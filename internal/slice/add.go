@@ -20,9 +20,14 @@ func Add[T any](src []T, element T, index int) ([]T, error) {
 		return nil, errs.NewErrIndexOutOfRange(length, index)
 	}
 
-	// copy 批量挪动, 效率更高
-	src = append(src, element)
-	copy(src[index+1:], src[index:])
-
+	//先将src扩展一个元素
+	var zeroValue T
+	src = append(src, zeroValue)
+	for i := len(src) - 1; i > index; i-- {
+		if i-1 >= 0 {
+			src[i] = src[i-1]
+		}
+	}
+	src[index] = element
 	return src, nil
 }
