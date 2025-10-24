@@ -21,13 +21,11 @@ func Add[T any](src []T, element T, index int) ([]T, error) {
 	}
 
 	//先将src扩展一个元素
-	var zeroValue T
-	src = append(src, zeroValue)
-	for i := len(src) - 1; i > index; i-- {
-		if i-1 >= 0 {
-			src[i] = src[i-1]
-		}
-	}
+	src = append(src, element)
+
+	// 一次性移动所有需要移动的元素
+	copy(src[index+1:], src[index:])
 	src[index] = element
+
 	return src, nil
 }

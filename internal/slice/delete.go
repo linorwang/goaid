@@ -19,11 +19,13 @@ func Delete[T any](src []T, index int) ([]T, T, error) {
 		return nil, zero, errs.NewErrIndexOutOfRange(length, index)
 	}
 	res := src[index]
-	//从index位置开始，后面的元素依次往前挪1个位置
-	for i := index; i+1 < length; i++ {
-		src[i] = src[i+1]
-	}
-	//去掉最后一个重复元素
-	src = src[:length-1]
-	return src, res, nil
+
+	// 一次性移动所有需要移动的元素
+	copy(src[index:], src[index+1:])
+
+	// 清空最后一个元素（避免内存泄漏，可选）
+	var zero T
+	src[length-1] = zero
+
+	return src[:length-1], res, nil
 }
