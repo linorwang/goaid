@@ -17,7 +17,7 @@ func ContainsFunc[T any](src []T, equal func(src T) bool) bool {
 	return false
 }
 
-// ContainsAny 判断 src 里面是否存在 dst 中的任何一个元素
+// ContainsAny 判断 src 里面是否存在 dst 中的任何一个元素(一个元素包含即返回true)
 func ContainsAny[T comparable](src, dst []T) bool {
 	srcMap := toMap[T](src)
 	for _, v := range dst {
