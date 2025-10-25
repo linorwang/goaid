@@ -1,6 +1,6 @@
 package slice
 
-// Contains 调用使用这个函数
+// Contains 判断 src 里面是否存在 dst
 func Contains[T comparable](src []T, dst T) bool {
 	return ContainsFunc[T](src, func(src T) bool {
 		return src == dst
