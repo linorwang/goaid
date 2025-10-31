@@ -14,15 +14,15 @@ var (
 type Type int
 
 const (
-	// TypeDigit 数字
+	// TypeDigit 数字(1)
 	TypeDigit Type = 1
-	// TypeLowerCase 小写字母
+	// TypeLowerCase 小写字母(2)
 	TypeLowerCase Type = 1 << 1
-	// TypeUpperCase 大写字母
+	// TypeUpperCase 大写字母(4)
 	TypeUpperCase Type = 1 << 2
-	// TypeSpecial 特殊符号
+	// TypeSpecial 特殊符号(8)
 	TypeSpecial Type = 1 << 3
-	// TypeMixed 混合类型
+	// TypeMixed 混合类型 (15)
 	TypeMixed = TypeDigit | TypeUpperCase | TypeLowerCase | TypeSpecial
 
 	// CharsetDigit 数字字符组
