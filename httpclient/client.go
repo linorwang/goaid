@@ -7,20 +7,28 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
 // client 实现Client接口
 type client struct {
-	httpClient *http.Client
+	httpClient  *http.Client
+	middlewares []Middleware
+	mu          sync.RWMutex
+	config      *clientConfig
 }
 
 // New 创建一个新的HTTP客户端实例
 func New(opts ...ClientOption) Client {
 	config := &clientConfig{
-		timeout:         30 * time.Second,
-		maxIdleConns:    100,
-		idleConnTimeout: 90 * time.Second,
+		timeout:                30 * time.Second,
+		maxIdleConns:           100,
+		maxIdleConnsPerHost:    100,
+		idleConnTimeout:        90 * time.Second,
+		keepAlive:              30 * time.Second,
+		defaultMaxRetries:      0,
+		defaultBackoffStrategy: NewExponentialBackoff(100*time.Millisecond, 5*time.Second),
 	}
 
 	for _, opt := range opts {
@@ -28,9 +36,17 @@ func New(opts ...ClientOption) Client {
 	}
 
 	transport := &http.Transport{
-		MaxIdleConns:        config.maxIdleConns,
-		IdleConnTimeout:     config.idleConnTimeout,
-		MaxIdleConnsPerHost: config.maxIdleConnsPerHost,
+		MaxIdleConns:          config.maxIdleConns,
+		IdleConnTimeout:       config.idleConnTimeout,
+		MaxIdleConnsPerHost:   config.maxIdleConnsPerHost,
+		MaxConnsPerHost:       config.maxConnsPerHost,
+		ResponseHeaderTimeout: config.responseHeaderTimeout,
+		TLSHandshakeTimeout:   config.tlsHandshakeTimeout,
+		ForceAttemptHTTP2:     config.forceAttemptHTTP2,
+	}
+
+	if config.keepAlive > 0 {
+		transport.IdleConnTimeout = config.keepAlive
 	}
 
 	if config.transport != nil {
@@ -43,7 +59,9 @@ func New(opts ...ClientOption) Client {
 	}
 
 	return &client{
-		httpClient: httpClient,
+		httpClient:  httpClient,
+		middlewares: make([]Middleware, 0),
+		config:      config,
 	}
 }
 
@@ -69,8 +87,17 @@ func (c *client) Delete(ctx context.Context, url string, opts ...RequestOption) 
 
 // Send 发送自定义方法请求
 func (c *client) Send(ctx context.Context, method, requestURL string, opts ...RequestOption) (*http.Response, error) {
+	resp, err := c.Do(ctx, method, requestURL, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Response, nil
+}
+
+// Do 发送请求并返回包装后的响应
+func (c *client) Do(ctx context.Context, method, requestURL string, opts ...RequestOption) (*Response, error) {
 	config := &RequestConfig{
-		Timeout:     0, // 使用客户端默认超时
+		Timeout:     0,
 		Headers:     make(map[string]string),
 		QueryParams: make(map[string]string),
 	}
@@ -112,13 +139,108 @@ func (c *client) Send(ctx context.Context, method, requestURL string, opts ...Re
 		req = req.WithContext(ctx)
 	}
 
-	// 发送请求
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+	// 处理重试
+	maxRetries := config.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = c.config.defaultMaxRetries
 	}
 
-	return resp, nil
+	var lastResp *http.Response
+	var lastErr error
+
+	for retry := 0; retry <= maxRetries; retry++ {
+		if retry > 0 {
+			// 执行退避
+			backoff := c.config.defaultBackoffStrategy.Next(retry - 1)
+			time.Sleep(backoff)
+		}
+
+		// 使用中间件处理请求
+		middlewareCtx := NewContext(req)
+		handler := c.buildHandler()
+
+		err = handler(middlewareCtx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		lastResp = middlewareCtx.Response
+		if lastResp != nil && lastResp.StatusCode >= 500 && retry < maxRetries {
+			// 服务器错误，继续重试
+			lastErr = fmt.Errorf("server error: %d", lastResp.StatusCode)
+			continue
+		}
+
+		// 成功或客户端错误，不再重试
+		break
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	return ReadResponse(lastResp)
+}
+
+// Use 添加中间件
+func (c *client) Use(middleware ...Middleware) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.middlewares = append(c.middlewares, middleware...)
+}
+
+// Clone 克隆客户端
+func (c *client) Clone() Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// 克隆配置
+	newConfig := &clientConfig{
+		timeout:                c.config.timeout,
+		maxIdleConns:           c.config.maxIdleConns,
+		maxIdleConnsPerHost:    c.config.maxIdleConnsPerHost,
+		idleConnTimeout:        c.config.idleConnTimeout,
+		transport:              c.config.transport,
+		maxConnsPerHost:        c.config.maxConnsPerHost,
+		responseHeaderTimeout:  c.config.responseHeaderTimeout,
+		tlsHandshakeTimeout:    c.config.tlsHandshakeTimeout,
+		keepAlive:              c.config.keepAlive,
+		forceAttemptHTTP2:      c.config.forceAttemptHTTP2,
+		defaultBackoffStrategy: c.config.defaultBackoffStrategy,
+		defaultMaxRetries:      c.config.defaultMaxRetries,
+	}
+
+	// 克隆中间件
+	middlewares := make([]Middleware, len(c.middlewares))
+	copy(middlewares, c.middlewares)
+
+	return &client{
+		httpClient:  c.httpClient,
+		middlewares: middlewares,
+		config:      newConfig,
+	}
+}
+
+// buildHandler 构建中间件链
+func (c *client) buildHandler() Handler {
+	// 从后往前构建中间件链
+	handler := func(ctx *Context) error {
+		resp, err := c.httpClient.Do(ctx.Request)
+		if err != nil {
+			ctx.Error = err
+			return err
+		}
+		ctx.Response = resp
+		return nil
+	}
+
+	// 应用中间件
+	for i := len(c.middlewares) - 1; i >= 0; i-- {
+		handler = c.middlewares[i](handler)
+	}
+
+	return handler
 }
 
 // WithTimeout 设置请求超时时间
@@ -164,6 +286,13 @@ func WithQueryParams(params map[string]string) RequestOption {
 func WithBody(body []byte) RequestOption {
 	return func(config *RequestConfig) {
 		config.Body = body
+	}
+}
+
+// WithRetry 设置重试次数
+func WithRetry(maxRetries int) RequestOption {
+	return func(config *RequestConfig) {
+		config.MaxRetries = maxRetries
 	}
 }
 
