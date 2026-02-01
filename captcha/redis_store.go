@@ -10,12 +10,21 @@ import (
 
 // RedisCaptchaStore 基于Redis的验证码存储
 type RedisCaptchaStore struct {
-	client *redis.Client
-	prefix string // 键前缀
+	client redis.Cmdable // 使用 redis.Cmdable 接口，支持单机、集群、哨兵等模式
+	prefix string        // 键前缀
 }
 
 // NewRedisCaptchaStore 创建Redis验证码存储
-func NewRedisCaptchaStore(client *redis.Client, prefix string) *RedisCaptchaStore {
+// 参数:
+//   - client: Redis 客户端实例，支持 redis.Cmdable 接口的任何实现
+//   - prefix: Redis 键前缀（可选，默认为 "captcha:"）
+//
+// 支持的 Redis 客户端类型:
+//   - *redis.Client (单机模式)
+//   - *redis.ClusterClient (集群模式)
+//   - *redis.Ring (哨兵模式)
+//   - 任何实现了 redis.Cmdable 接口的自定义客户端
+func NewRedisCaptchaStore(client redis.Cmdable, prefix string) *RedisCaptchaStore {
 	if prefix == "" {
 		prefix = "captcha:"
 	}

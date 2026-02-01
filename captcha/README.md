@@ -1,188 +1,421 @@
 # Captcha 验证码模块
 
-验证码模块提供图片验证码的生成、验证和管理功能，支持自定义配置和多种存储后端。
+一个简单的图片验证码工具包，帮你快速实现验证码功能。
 
-## 功能特性
-
-- 生成图片验证码
-- 验证码验证与管理
-- Redis 存储支持
-- 可配置的验证码参数
-- Base64 格式图片输出
-
-## 安装
+## 📦 安装
 
 ```bash
 go get -u github.com/linorwang/goaid
 ```
 
-## 快速开始
+## 🚀 快速开始（3 步搞定）
+
+### 第一步：导入包
+
+```go
+import (
+    "github.com/linorwang/goaid/captcha"
+    "github.com/redis/go-redis/v9"
+)
+```
+
+### 第二步：初始化验证码服务
+
+```go
+// 使用你已有的 Redis 客户端
+redisClient := redis.NewClient(&redis.Options{
+    Addr:     "localhost:6379",
+    Password: "",
+    DB:       0,
+})
+
+// 创建验证码服务
+captchaStore := captcha.NewRedisCaptchaStore(redisClient, "myapp:captcha:")
+captchaService := captcha.NewDefaultImageCaptchaService(captchaStore, captcha.CaptchaOption{
+    ExpireTime: 5 * time.Minute, // 5 分钟过期
+    Length:     4,               // 4 位数字
+    Width:      120,             // 图片宽度
+    Height:     40,              // 图片高度
+})
+```
+
+### 第三步：使用验证码
+
+**生成验证码：**
+```go
+ctx := context.Background()
+resp, err := captchaService.GenerateImageCaptcha(ctx, 0, 0)
+if err != nil {
+    // 处理错误
+}
+
+// 返回给前端的数据
+fmt.Println("验证码ID:", resp.ID)              // 保存到前端，用于验证
+fmt.Println("图片数据:", resp.ImageBase64)      // 直接给前端显示图片
+```
+
+**验证验证码：**
+```go
+isValid, err := captchaService.VerifyCaptcha(ctx, resp.ID, "用户输入的验证码")
+if err != nil {
+    // 处理错误
+}
+
+if isValid {
+    fmt.Println("验证成功！")
+} else {
+    fmt.Println("验证失败！")
+}
+```
+
+## 💡 与你的项目集成
+
+如果你的项目中已经有 `ioc.InitRedis()` 方法，这样用：
+
+```go
+// 获取你已有的 Redis 客户端
+redisClient := ioc.InitRedis()  // 返回 redis.Cmdable 类型
+
+// 直接使用，不需要类型转换
+captchaStore := captcha.NewRedisCaptchaStore(redisClient, "myapp:captcha:")
+```
+
+**兼容说明：**
+- ✅ 完全兼容 `redis.Cmdable` 接口
+- ✅ 支持单机、集群、哨兵等所有 Redis 模式
+- ✅ 无需任何类型转换
+
+## 🔄 验证码使用流程
+
+### 前端流程（登录页面）
+
+```
+用户访问登录页面
+    ↓
+页面加载（window.onload）
+    ↓
+自动请求生成验证码接口
+    ↓
+后端返回验证码ID和图片
+    ↓
+前端保存ID，显示图片
+    ↓
+用户输入验证码
+    ↓
+点击登录按钮
+    ↓
+先验证验证码是否正确
+    ↓
+验证成功？
+    ├─ 是 → 提交登录请求
+    │       ↓
+    │   登录成功？
+    │       ├─ 是 → 跳转首页
+    │       └─ 否 → 刷新验证码，提示错误
+    │
+    └─ 否 → 刷新验证码，提示错误
+```
+
+### 关键要点
+
+⚠️ **必须在页面加载时就请求验证码**
+- 在 `window.onload` 中调用生成接口
+- 确保用户看到页面时验证码已准备好
+- 不要等用户点击才生成
+
+⚠️ **验证码ID必须保存到全局变量**
+- 后端返回的ID用于后续验证
+- 每次生成验证码都要更新ID
+- 验证时使用正确的ID
+
+⚠️ **验证失败后必须刷新验证码**
+- 防止暴力破解
+- 提高安全性
+- 给用户重新尝试的机会
+
+⚠️ **验证成功后验证码会被自动删除**
+- 同一个验证码不能重复使用
+- 需要重新生成新验证码
+
+### 完整的登录页面示例
+
+查看 `captcha/example/login_with_captcha.html` 获取完整的登录页面示例，包含：
+- 页面加载时自动生成验证码
+- 点击图片刷新验证码
+- 验证失败自动刷新
+- 完整的错误处理
+- 详细的代码注释
+
+## 🌐 Web 应用示例
+
+### 后端代码
 
 ```go
 package main
 
 import (
     "context"
-    "fmt"
+    "encoding/json"
+    "net/http"
     "time"
 
     "github.com/linorwang/goaid/captcha"
     "github.com/redis/go-redis/v9"
 )
 
+// 全局验证码服务
+var captchaService captcha.ImageCaptchaService
+
 func main() {
-    // 初始化 Redis 客户端
+    // 初始化 Redis（使用你已有的客户端）
     redisClient := redis.NewClient(&redis.Options{
         Addr: "localhost:6379",
     })
 
-    // 创建验证码存储
-    captchaStore := captcha.NewRedisCaptchaStore(redisClient, "captcha:")
-
-    // 配置验证码选项
-    opts := captcha.CaptchaOption{
+    // 初始化验证码服务
+    captchaStore := captcha.NewRedisCaptchaStore(redisClient, "myapp:captcha:")
+    captchaService = captcha.NewDefaultImageCaptchaService(captchaStore, captcha.CaptchaOption{
         ExpireTime: 5 * time.Minute,
         Length:     4,
         Width:      120,
         Height:     40,
-    }
+    })
 
-    // 创建验证码服务
-    service := captcha.NewDefaultImageCaptchaService(captchaStore, opts)
+    // 注册接口
+    http.HandleFunc("/api/captcha/generate", generateHandler)
+    http.HandleFunc("/api/captcha/verify", verifyHandler)
 
-    // 生成验证码
-    ctx := context.Background()
-    resp, err := service.GenerateImageCaptcha(ctx, 0, 0)
-    if err != nil {
-        fmt.Printf("生成验证码失败: %v\n", err)
-        return
-    }
-
-    fmt.Printf("验证码ID: %s\n", resp.ID)
-    fmt.Printf("Base64图片长度: %d\n", len(resp.ImageBase64))
-
-    // 将 resp.ImageBase64 直接返回给前端，前端可以直接使用
-    // 例如在HTML中: <img src="" + resp.ImageBase64 + "" alt="验证码">
-
-    // 验证验证码
-    isValid, err := service.VerifyCaptcha(ctx, resp.ID, "user_input")
-    if err != nil {
-        fmt.Printf("验证失败: %v\n", err)
-        return
-    }
-
-    if isValid {
-        fmt.Println("验证码验证成功")
-    } else {
-        fmt.Println("验证码验证失败")
-    }
+    http.ListenAndServe(":8080", nil)
 }
-```
 
-## 使用说明
-
-### 1. 与已有 Redis 客户端集成
-
-如果您的项目已经初始化了 Redis 客户端，可以直接使用：
-
-```go
-// 使用您已有的 Redis 客户端
-captchaStore := captcha.NewRedisCaptchaStore(yourRedisClient, "myapp:captcha:")
-
-// 创建验证码服务
-captchaService := captcha.NewDefaultImageCaptchaService(captchaStore, captchaOpts)
-```
-
-### 2. 前端集成
-
-前端可以直接使用返回的 `ImageBase64` 字段，无需额外解码：
-
-```html
-<!-- 直接使用 ImageBase64 作为图片的 src -->
-<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHgAAABQCAYAAAC..." alt="验证码">
-```
-
-### 3. Web API 集成示例
-
-在 Web 应用中，您可以创建如下 API 接口：
-
-```go
 // 生成验证码接口
-func generateCaptchaHandler(w http.ResponseWriter, r *http.Request) {
-    ctx := context.Background()
-    resp, err := captchaService.GenerateImageCaptcha(ctx, 0, 0)
+func generateHandler(w http.ResponseWriter, r *http.Request) {
+    resp, err := captchaService.GenerateImageCaptcha(context.Background(), 0, 0)
     if err != nil {
-        // 处理错误
+        http.Error(w, "生成失败", http.StatusInternalServerError)
         return
     }
-    
-    // 返回包含 ImageBase64 的 JSON 响应
-    response := map[string]interface{}{
+
+    json.NewEncoder(w).Encode(map[string]interface{}{
         "code": 200,
-        "message": "success",
-        "data": map[string]interface{}{
-            "id": resp.ID,
-            "image_base64": resp.ImageBase64, // 前端可直接使用的 base64 图片
-            "expire_at": resp.ExpireAt.Unix(),
+        "data": map[string]string{
+            "id":           resp.ID,
+            "image_base64": resp.ImageBase64,
         },
-    }
-    
-    json.NewEncoder(w).Encode(response)
+    })
 }
 
 // 验证验证码接口
-func verifyCaptchaHandler(w http.ResponseWriter, r *http.Request) {
-    // 解析请求数据
+func verifyHandler(w http.ResponseWriter, r *http.Request) {
     var req struct {
         ID     string `json:"id"`
         Answer string `json:"answer"`
     }
     json.NewDecoder(r.Body).Decode(&req)
-    
-    ctx := context.Background()
-    isValid, err := captchaService.VerifyCaptcha(ctx, req.ID, req.Answer)
-    if err != nil {
-        // 处理错误
-        return
-    }
-    
-    response := map[string]interface{}{
+
+    isValid, _ := captchaService.VerifyCaptcha(context.Background(), req.ID, req.Answer)
+
+    json.NewEncoder(w).Encode(map[string]interface{}{
         "code": 200,
-        "message": "success",
         "data": isValid,
-    }
-    
-    json.NewEncoder(w).Encode(response)
+    })
 }
 ```
 
-## API 文档
+### 前端代码（HTML + JavaScript）
 
-### CaptchaOption 配置选项
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>验证码示例</title>
+</head>
+<body>
+    <div>
+        <!-- 验证码图片 -->
+        <img id="captcha-img" src="" />
+        
+        <!-- 刷新按钮 -->
+        <button onclick="refreshCaptcha()">刷新</button>
+        
+        <!-- 输入框 -->
+        <input type="text" id="captcha-input" placeholder="输入验证码" />
+        <button onclick="verifyCaptcha()">验证</button>
+        
+        <!-- 提示信息 -->
+        <p id="message"></p>
+    </div>
 
-- `ExpireTime`: 验证码过期时间，默认 5 分钟
-- `Length`: 验证码长度，默认 4 位
-- `Width`: 图片宽度，默认 120 像素
-- `Height`: 图片高度，默认 40 像素
-- `Complexity`: 复杂度级别
+    <script>
+        let captchaId = '';
 
-### CaptchaResponse 响应结构
+        // 生成验证码
+        async function refreshCaptcha() {
+            const res = await fetch('/api/captcha/generate', {
+                method: 'POST'
+            });
+            const data = await res.json();
+            
+            captchaId = data.data.id;
+            document.getElementById('captcha-img').src = data.data.image_base64;
+        }
 
-- `ID`: 验证码唯一标识符
-- `Image`: 图片对象（用于内部处理）
-- `ImageBase64`: Base64 编码的图片数据，前端可直接使用
-- `ExpireAt`: 过期时间
-- `Value`: 验证码值（仅用于测试，生产环境不应返回）
+        // 验证验证码
+        async function verifyCaptcha() {
+            const input = document.getElementById('captcha-input').value;
+            const res = await fetch('/api/captcha/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: captchaId,
+                    answer: input
+                })
+            });
+            const data = await res.json();
+            
+            if (data.data) {
+                document.getElementById('message').textContent = '✅ 验证成功';
+            } else {
+                document.getElementById('message').textContent = '❌ 验证失败';
+            }
+        }
 
-### 主要方法
+        // 页面加载时生成验证码
+        window.onload = refreshCaptcha;
+    </script>
+</body>
+</html>
+```
 
-- `GenerateImageCaptcha(ctx, width, height)`: 生成图片验证码
-- `VerifyCaptcha(ctx, id, answer)`: 验证验证码
-- `DeleteCaptcha(ctx, id)`: 删除验证码
+## 📝 API 说明
 
-## 注意事项
+### NewRedisCaptchaStore
 
-1. 生产环境中，不要返回 `Value` 字段给前端
-2. 验证码验证成功后会自动删除，防止重复使用
-3. 前端可以直接使用 `ImageBase64` 字段作为图片的 `src` 属性
-4. 验证码 ID 需要与用户输入的验证码值一起提交到后端验证
+创建 Redis 验证码存储。
+
+```go
+captcha.NewRedisCaptchaStore(redis客户端, "键前缀")
+```
+
+**示例：**
+```go
+captchaStore := captcha.NewRedisCaptchaStore(redisClient, "myapp:captcha:")
+```
+
+### NewDefaultImageCaptchaService
+
+创建验证码服务。
+
+```go
+captcha.NewDefaultImageCaptchaService(存储实例, 配置选项)
+```
+
+**配置选项：**
+| 参数        | 说明              | 默认值   |
+|------------|------------------|---------|
+| ExpireTime | 过期时间          | 5 分钟  |
+| Length     | 验证码长度        | 4       |
+| Width      | 图片宽度（像素）   | 120     |
+| Height     | 图片高度（像素）   | 40      |
+
+**示例：**
+```go
+service := captcha.NewDefaultImageCaptchaService(captchaStore, captcha.CaptchaOption{
+    ExpireTime: 5 * time.Minute,
+    Length:     4,
+    Width:      120,
+    Height:     40,
+})
+```
+
+### GenerateImageCaptcha
+
+生成验证码。
+
+```go
+resp, err := service.GenerateImageCaptcha(上下文, 宽度, 高度)
+```
+
+**返回数据：**
+- `ID`: 验证码 ID（用于验证）
+- `ImageBase64`: 图片数据（直接给前端显示）
+- `Value`: 验证码值（仅用于测试，不要返回给前端）
+
+**示例：**
+```go
+resp, err := service.GenerateImageCaptcha(ctx, 0, 0)
+```
+
+### VerifyCaptcha
+
+验证验证码。
+
+```go
+isValid, err := service.VerifyCaptcha(上下文, 验证码ID, 用户输入)
+```
+
+**返回：**
+- `true`: 验证成功（验证码会被自动删除）
+- `false`: 验证失败
+
+**示例：**
+```go
+isValid, err := service.VerifyCaptcha(ctx, captchaId, userInput)
+```
+
+## ⚠️ 注意事项
+
+1. **不要返回验证码值给前端**
+   ```go
+   // ❌ 错误
+   return resp.Value
+   
+   // ✅ 正确
+   return resp.ID, resp.ImageBase64
+   ```
+
+2. **使用有意义的键前缀**
+   ```go
+   // ✅ 推荐
+   captcha.NewRedisCaptchaStore(redisClient, "myapp:captcha:")
+   
+   // ❌ 不推荐
+   captcha.NewRedisCaptchaStore(redisClient, "")
+   ```
+
+3. **验证成功后验证码会自动删除**，防止重复使用
+
+4. **前端可以直接使用 ImageBase64**，无需额外处理
+
+## 🔗 完整示例
+
+查看 `captcha/example/` 目录下的示例代码：
+- `integration_with_ioc.go` - 与 IOC 集成示例
+- `usage_example.go` - 基本使用示例
+- `web_example.go` - Web 应用示例
+- `frontend_example.html` - 前端完整示例
+
+## 💬 常见问题
+
+**Q: 支持哪些 Redis 模式？**
+
+A: 支持所有实现了 `redis.Cmdable` 接口的 Redis 客户端：
+- 单机模式（`*redis.Client`）
+- 集群模式（`*redis.ClusterClient`）
+- 哨兵模式（`*redis.Ring`）
+
+**Q: 验证码过期后怎么办？**
+
+A: 验证码会自动过期，验证失败时建议刷新验证码。
+
+**Q: 验证成功后还能再次验证吗？**
+
+A: 不能。验证成功后验证码会被自动删除，防止重复使用。
+
+**Q: 如何测试验证码？**
+
+A: 可以在测试中使用 `resp.Value` 字段查看验证码值，但不要在生产环境返回给前端。
+
+---
+
+有问题？查看 `captcha/OPTIMIZATION_RECOMMENDATIONS.md` 获取更多优化建议。
