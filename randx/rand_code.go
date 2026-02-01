@@ -2,8 +2,11 @@ package randx
 
 import (
 	"errors"
-	"github.com/linorwang/goaid/tuple/pair"
 	"math/rand"
+	"strings"
+	"time"
+
+	"github.com/linorwang/goaid/tuple/pair"
 )
 
 var (
@@ -45,6 +48,10 @@ var (
 	}
 )
 
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
 // RandCode 根据传入的长度和类型生成随机字符串 条件 length >= 0，否则会返回 errLengthLessThanZero
 // 请保证输入的 typ 的取值范围在 (0, type.MIXED] 内，否则会返回 errTypeNotSupported
 func RandCode(length int, typ Type) (string, error) {
@@ -54,16 +61,17 @@ func RandCode(length int, typ Type) (string, error) {
 	if length == 0 {
 		return "", nil
 	}
-	if typ > TypeMixed {
+	if typ == 0 || typ > TypeMixed {
 		return "", errTypeNotSupported
 	}
-	charset := ""
+
+	var builder strings.Builder
 	for _, p := range typeCharsetPairs {
 		if (typ & p.Key) == p.Key {
-			charset += p.Value
+			builder.WriteString(p.Value)
 		}
 	}
-	return RandStrByCharset(length, charset)
+	return RandStrByCharset(length, builder.String())
 }
 
 // RandStrByCharset 根据传入的长度和字符集生成随机字符串 条件 length >= 0，否则会返回 errLengthLessThanZero
