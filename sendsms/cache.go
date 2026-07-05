@@ -17,6 +17,9 @@ type SMSCache struct {
 
 // NewSMSCache 创建缓存实例
 func NewSMSCache(client redis.Cmdable, config *CacheConfig) *SMSCache {
+	if client == nil {
+		return nil
+	}
 	if config == nil {
 		config = &CacheConfig{}
 	}

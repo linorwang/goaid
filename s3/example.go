@@ -17,7 +17,6 @@ func Example() {
 		SecretAccessKey: "your-secret-access-key",
 		Region:          "us-east-1",
 		Bucket:          "your-bucket-name",
-		UseSSL:          true,
 	}
 
 	// Create S3 client
@@ -195,7 +194,7 @@ func ExampleWithMinIO() {
 		SecretAccessKey: "minioadmin",
 		Region:          "us-east-1",
 		Bucket:          "my-bucket",
-		UseSSL:          false,
+		AddressingStyle: AddressingStylePath,
 	}
 
 	client, err := NewClient(cfg)
@@ -216,6 +215,36 @@ func ExampleWithMinIO() {
 	fmt.Printf("URL: %s\n", result.URL)
 }
 
+// ExampleWithRustFS demonstrates usage with RustFS (S3-compatible storage).
+func ExampleWithRustFS() {
+	cfg := &Config{
+		Endpoint:        "http://localhost:9000",
+		PublicEndpoint:  "https://files.example.com",
+		AccessKeyID:     "rustfs-access-key",
+		SecretAccessKey: "rustfs-secret-key",
+		Region:          "us-east-1",
+		Bucket:          "my-bucket",
+		AddressingStyle: AddressingStylePath,
+		ObjectURLStyle:  ObjectURLStylePublicEndpoint,
+	}
+
+	client, err := NewClient(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create RustFS client: %v", err)
+	}
+
+	ctx := context.Background()
+
+	data := []byte("Hello RustFS!")
+	result, err := client.Upload(ctx, "test.txt", data, "text/plain", Metadata{})
+	if err != nil {
+		log.Fatalf("Failed to upload: %v", err)
+	}
+
+	fmt.Printf("Uploaded to RustFS!\n")
+	fmt.Printf("URL: %s\n", result.URL)
+}
+
 // ExampleWithCustomEndpoint demonstrates usage with any S3-compatible service
 func ExampleWithCustomEndpoint(endpoint, accessKey, secretKey, bucket string) {
 	cfg := &Config{
@@ -224,7 +253,7 @@ func ExampleWithCustomEndpoint(endpoint, accessKey, secretKey, bucket string) {
 		SecretAccessKey: secretKey,
 		Region:          "us-east-1",
 		Bucket:          bucket,
-		UseSSL:          true,
+		AddressingStyle: AddressingStylePath,
 	}
 
 	client, err := NewClient(cfg)
@@ -237,4 +266,24 @@ func ExampleWithCustomEndpoint(endpoint, accessKey, secretKey, bucket string) {
 	// Use the client for your operations...
 	_ = client
 	_ = ctx
+}
+
+// ExampleWithVirtualHostStyle demonstrates AWS-style virtual-host addressing.
+func ExampleWithVirtualHostStyle() {
+	cfg := &Config{
+		Endpoint:        "https://s3.amazonaws.com",
+		AccessKeyID:     "your-access-key",
+		SecretAccessKey: "your-secret-key",
+		Region:          "us-east-1",
+		Bucket:          "your-bucket",
+		AddressingStyle: AddressingStyleVirtualHost,
+		ObjectURLStyle:  ObjectURLStyleVirtualHost,
+	}
+
+	client, err := NewClient(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create S3 client: %v", err)
+	}
+
+	fmt.Println(client.GetObjectURL("images/photo.jpg"))
 }

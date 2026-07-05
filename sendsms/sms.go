@@ -11,7 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// SMSClient 短信客户端
+// SMSClient is the high-level SMS sender.
 type SMSClient struct {
 	provider    SMSProvider
 	failoverMgr *FailoverManagerImpl
@@ -22,13 +22,21 @@ type SMSClient struct {
 	mu          sync.RWMutex
 }
 
-// NewSMSClient 创建短信客户端
+// NewSMSClient creates an SMS client. Prefer New with ClientOption for new code.
 func NewSMSClient(primary string, backups []string, providers map[string]SMSProvider, cache redis.Cmdable, config *Config) (*SMSClient, error) {
-	if config == nil {
-		config = DefaultConfig()
+	config = normalizeConfig(config)
+	if primary == "" {
+		primary = config.PrimaryProvider
 	}
-
-	// 验证主服务商存在
+	if len(backups) == 0 {
+		backups = config.BackupProviders
+	}
+	if providers == nil {
+		return nil, fmt.Errorf("%w: providers is nil", ErrConfigInvalid)
+	}
+	if primary == "" {
+		return nil, fmt.Errorf("%w: primary provider is empty", ErrConfigInvalid)
+	}
 	if _, ok := providers[primary]; !ok {
 		return nil, fmt.Errorf("primary provider %s not found", primary)
 	}
@@ -40,7 +48,6 @@ func NewSMSClient(primary string, backups []string, providers map[string]SMSProv
 		retryMgr:  NewRetryManager(config),
 	}
 
-	// 初始化 Failover 管理器
 	if config.EnableFailover {
 		client.failoverMgr = NewFailoverManager(
 			primary,
@@ -50,24 +57,25 @@ func NewSMSClient(primary string, backups []string, providers map[string]SMSProv
 			config.FailoverCooldown,
 		)
 	} else {
-		// 不启用 Failover，只使用主服务商
 		client.provider = providers[primary]
 	}
 
 	return client, nil
 }
 
-// Send 发送短信（带容错和 Failover）
+// Send sends one SMS with retry, optional rate limiting, and optional failover.
 func (c *SMSClient) Send(ctx context.Context, req *SMSRequest) (*SMSResponse, error) {
-	// 验证请求
+	ctx, cancel := c.contextWithTimeout(ctx)
+	defer cancel()
+
+	req = c.prepareRequest(req)
 	if err := c.validateRequest(req); err != nil {
 		return nil, err
 	}
 
 	startTime := time.Now()
 
-	// 限流检查
-	if c.cache != nil && c.config.CacheConfig.EnableLimit {
+	if c.cache != nil && c.config.CacheConfig != nil && c.config.CacheConfig.EnableLimit {
 		canSend, err := c.cache.CheckLimit(ctx, req.Phone)
 		if err != nil {
 			return nil, fmt.Errorf("check limit failed: %w", err)
@@ -81,66 +89,57 @@ func (c *SMSClient) Send(ctx context.Context, req *SMSRequest) (*SMSResponse, er
 		}
 	}
 
-	// 记录发送尝试
 	if c.cache != nil {
 		_ = c.cache.RecordAttempt(ctx, req.Phone)
 	}
 
-	var provider SMSProvider
-	var lastProviderName string
 	var resp *SMSResponse
 	var err error
+	var successProvider string
 
-	// 如果启用了 Failover
 	if c.failoverMgr != nil {
-		provider = c.failoverMgr.GetAvailableProvider()
-		lastProviderName = provider.Name()
-
-		// 使用重试管理器发送
-		resp, err = c.retryMgr.Retry(ctx, func() (*SMSResponse, error) {
-			return provider.Send(ctx, req)
-		})
-
-		if err != nil {
-			// 标记服务商失败
-			c.failoverMgr.MarkProviderFailed(lastProviderName)
-
-			// 尝试 Failover
-			backupProvider := c.failoverMgr.GetAvailableProvider()
-			if backupProvider != nil && backupProvider.Name() != lastProviderName {
-				resp, err = c.retryMgr.Retry(ctx, func() (*SMSResponse, error) {
-					backupResp, backupErr := backupProvider.Send(ctx, req)
-					if backupErr == nil {
-						// 成功，记录 Failover
-						if c.cache != nil {
-							_ = c.cache.SaveFailoverRecord(ctx, req.Phone, lastProviderName, backupProvider.Name())
-						}
-						c.failoverMgr.MarkProviderHealthy(backupProvider.Name())
-					}
-					return backupResp, backupErr
-				})
+		var firstFailedProvider string
+		for _, provider := range c.failoverMgr.GetProviderCandidates() {
+			if provider == nil {
+				continue
 			}
-		} else {
-			// 成功，标记服务商健康
-			c.failoverMgr.MarkProviderHealthy(lastProviderName)
+			providerName := provider.Name()
+			resp, err = c.retryMgr.Retry(ctx, func() (*SMSResponse, error) {
+				return provider.Send(ctx, req)
+			})
+			if err == nil {
+				successProvider = providerName
+				c.failoverMgr.MarkProviderHealthy(providerName)
+				if firstFailedProvider != "" && c.cache != nil {
+					_ = c.cache.SaveFailoverRecord(ctx, req.Phone, firstFailedProvider, providerName)
+				}
+				break
+			}
+			if firstFailedProvider == "" {
+				firstFailedProvider = providerName
+			}
+			c.failoverMgr.MarkProviderFailed(providerName)
 		}
 	} else {
-		// 不启用 Failover，直接发送
 		resp, err = c.retryMgr.Retry(ctx, func() (*SMSResponse, error) {
 			return c.provider.Send(ctx, req)
 		})
+		if c.provider != nil {
+			successProvider = c.provider.Name()
+		}
 	}
 
-	// 设置响应信息
 	if resp != nil {
-		resp.Provider = lastProviderName
+		if successProvider != "" {
+			resp.Provider = successProvider
+		}
 		resp.Duration = time.Since(startTime)
 	}
 
 	return resp, err
 }
 
-// SendBatch 批量发送（带容错）
+// SendBatch sends requests one by one.
 func (c *SMSClient) SendBatch(ctx context.Context, reqs []*SMSRequest) (*BatchResult, error) {
 	if len(reqs) == 0 {
 		return &BatchResult{
@@ -157,7 +156,6 @@ func (c *SMSClient) SendBatch(ctx context.Context, reqs []*SMSRequest) (*BatchRe
 		FailedReqs: []*SMSRequest{},
 	}
 
-	// 逐个发送
 	for i, req := range reqs {
 		resp, err := c.Send(ctx, req)
 		result.Responses[i] = resp
@@ -173,7 +171,7 @@ func (c *SMSClient) SendBatch(ctx context.Context, reqs []*SMSRequest) (*BatchRe
 	return result, nil
 }
 
-// SendBatchConcurrent 并发批量发送
+// SendBatchConcurrent sends requests concurrently with a bounded worker count.
 func (c *SMSClient) SendBatchConcurrent(ctx context.Context, reqs []*SMSRequest, concurrency int) (*BatchResult, error) {
 	if len(reqs) == 0 {
 		return &BatchResult{
@@ -226,30 +224,17 @@ func (c *SMSClient) SendBatchConcurrent(ctx context.Context, reqs []*SMSRequest,
 	return result, nil
 }
 
-// SendVerificationCode 发送验证码
+// SendVerificationCode generates and sends a verification code.
 func (c *SMSClient) SendVerificationCode(ctx context.Context, req *VerificationCodeRequest) (*SMSResponse, error) {
-	// 检查频率限制
-	if c.cache != nil {
-		canSend, err := c.cache.CheckLimit(ctx, req.Phone)
-		if err != nil {
-			return nil, fmt.Errorf("check limit failed: %w", err)
-		}
-		if !canSend {
-			return &SMSResponse{
-				Success: false,
-				Message: "rate limit exceeded",
-				Error:   ErrRateLimitExceeded,
-			}, ErrRateLimitExceeded
-		}
+	if req == nil || req.Phone == "" {
+		return nil, ErrInvalidPhone
 	}
 
-	// 生成验证码
 	code, err := c.generateVerificationCode(req.CodeLength)
 	if err != nil {
 		return nil, fmt.Errorf("generate verification code failed: %w", err)
 	}
 
-	// 保存验证码
 	if c.cache != nil {
 		err = c.cache.SaveCode(ctx, req.Phone, code, req.ExpireTime)
 		if err != nil {
@@ -257,7 +242,6 @@ func (c *SMSClient) SendVerificationCode(ctx context.Context, req *VerificationC
 		}
 	}
 
-	// 发送短信
 	smsReq := &SMSRequest{
 		Phone:    req.Phone,
 		Template: req.Template,
@@ -269,8 +253,14 @@ func (c *SMSClient) SendVerificationCode(ctx context.Context, req *VerificationC
 	return c.Send(ctx, smsReq)
 }
 
-// VerifyCode 验证验证码
+// VerifyCode verifies a previously saved verification code.
 func (c *SMSClient) VerifyCode(ctx context.Context, req *VerifyCodeRequest) (*VerifyResult, error) {
+	if req == nil || req.Phone == "" {
+		return &VerifyResult{
+			Valid:   false,
+			Message: "invalid phone number",
+		}, nil
+	}
 	if c.cache == nil {
 		return &VerifyResult{
 			Valid:   false,
@@ -278,7 +268,6 @@ func (c *SMSClient) VerifyCode(ctx context.Context, req *VerifyCodeRequest) (*Ve
 		}, nil
 	}
 
-	// 获取保存的验证码
 	savedCode, err := c.cache.GetCode(ctx, req.Phone)
 	if err != nil {
 		if err == redis.Nil {
@@ -297,7 +286,6 @@ func (c *SMSClient) VerifyCode(ctx context.Context, req *VerifyCodeRequest) (*Ve
 		}, nil
 	}
 
-	// 验证码不匹配
 	if savedCode != req.Code {
 		return &VerifyResult{
 			Valid:   false,
@@ -305,7 +293,6 @@ func (c *SMSClient) VerifyCode(ctx context.Context, req *VerifyCodeRequest) (*Ve
 		}, nil
 	}
 
-	// 验证成功，删除验证码
 	if req.CleanOnce {
 		_ = c.cache.DeleteCode(ctx, req.Phone)
 	}
@@ -316,7 +303,7 @@ func (c *SMSClient) VerifyCode(ctx context.Context, req *VerifyCodeRequest) (*Ve
 	}, nil
 }
 
-// SendWithTemplate 使用模板发送（简化接口）
+// SendWithTemplate sends an SMS by template.
 func (c *SMSClient) SendWithTemplate(ctx context.Context, phone, templateID, signName string, params []string) (*SMSResponse, error) {
 	return c.Send(ctx, &SMSRequest{
 		Phone:    phone,
@@ -326,7 +313,7 @@ func (c *SMSClient) SendWithTemplate(ctx context.Context, phone, templateID, sig
 	})
 }
 
-// GetHealthStatus 获取所有服务商健康状态
+// GetHealthStatus returns all provider health states.
 func (c *SMSClient) GetHealthStatus() []*ProviderHealth {
 	if c.failoverMgr != nil {
 		return c.failoverMgr.GetHealthStatus()
@@ -334,14 +321,13 @@ func (c *SMSClient) GetHealthStatus() []*ProviderHealth {
 	return []*ProviderHealth{}
 }
 
-// RetryFailed 重试失败的请求
+// RetryFailed retries failed requests.
 func (c *SMSClient) RetryFailed(ctx context.Context, failedReqs []*SMSRequest) (*BatchResult, error) {
 	return c.SendBatch(ctx, failedReqs)
 }
 
-// validateRequest 验证请求
 func (c *SMSClient) validateRequest(req *SMSRequest) error {
-	if req.Phone == "" {
+	if req == nil || req.Phone == "" {
 		return ErrInvalidPhone
 	}
 	if req.Template == "" && req.Content == "" {
@@ -350,7 +336,30 @@ func (c *SMSClient) validateRequest(req *SMSRequest) error {
 	return nil
 }
 
-// generateVerificationCode 生成验证码
+func (c *SMSClient) prepareRequest(req *SMSRequest) *SMSRequest {
+	if req == nil {
+		return nil
+	}
+	prepared := *req
+	if prepared.Template == "" {
+		prepared.Template = c.config.DefaultTemplate
+	}
+	if prepared.SignName == "" {
+		prepared.SignName = c.config.DefaultSign
+	}
+	return &prepared
+}
+
+func (c *SMSClient) contextWithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.config == nil || c.config.Timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, c.config.Timeout)
+}
+
 func (c *SMSClient) generateVerificationCode(length int) (string, error) {
 	if length <= 0 {
 		length = 6

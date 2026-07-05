@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,86 +10,86 @@ import (
 	"time"
 )
 
-// RequestOption 定义请求选项
+// RequestOption configures a single request.
 type RequestOption func(*RequestConfig)
 
-// RequestConfig 请求配置
+// RequestConfig stores request-scoped settings built from RequestOption values.
 type RequestConfig struct {
 	Timeout     time.Duration
 	Headers     map[string]string
 	QueryParams map[string]string
 	Body        []byte
 	MaxRetries  int
+
+	err               error
+	maxRetriesSet     bool
+	basicAuthUsername string
+	basicAuthPassword string
+	basicAuthSet      bool
 }
 
-// Client HTTP客户端接口
+// Client sends HTTP requests.
+//
+// Use Do for common API calls where the response body should be read eagerly.
+// Use Get, Post, Put, Delete, or Send when callers need the raw *http.Response.
 type Client interface {
-	// Get 发送GET请求
 	Get(ctx context.Context, url string, opts ...RequestOption) (*http.Response, error)
-
-	// Post 发送POST请求
 	Post(ctx context.Context, url string, opts ...RequestOption) (*http.Response, error)
-
-	// Put 发送PUT请求
 	Put(ctx context.Context, url string, opts ...RequestOption) (*http.Response, error)
-
-	// Delete 发送DELETE请求
 	Delete(ctx context.Context, url string, opts ...RequestOption) (*http.Response, error)
-
-	// Send 发送自定义方法请求
 	Send(ctx context.Context, method, url string, opts ...RequestOption) (*http.Response, error)
-
-	// Do 发送请求并返回包装后的响应
 	Do(ctx context.Context, method, url string, opts ...RequestOption) (*Response, error)
-
-	// Use 添加中间件
 	Use(middleware ...Middleware)
-
-	// Clone 克隆客户端
 	Clone() Client
 }
 
-// ResponseWrapper 响应包装器（保留向后兼容）
+// ResponseWrapper is kept for backward compatibility.
 type ResponseWrapper struct {
 	*http.Response
 	BodyBytes []byte
 }
 
-// Response 增强的响应包装器
+// Response wraps an HTTP response whose body has already been read.
 type Response struct {
 	*http.Response
 	bodyBytes []byte
 	readTime  time.Duration
 }
 
-// String 返回响应体字符串
+// String returns the response body as a string.
 func (r *Response) String() string {
-	if r.bodyBytes == nil {
+	if r == nil || r.bodyBytes == nil {
 		return ""
 	}
 	return string(r.bodyBytes)
 }
 
-// Bytes 返回响应体字节数组
+// Bytes returns a copy of the response body bytes.
 func (r *Response) Bytes() []byte {
-	return r.bodyBytes
+	if r == nil || r.bodyBytes == nil {
+		return nil
+	}
+	return append([]byte(nil), r.bodyBytes...)
 }
 
-// JSON 将响应体反序列化到指定对象
+// JSON decodes the response body into v.
 func (r *Response) JSON(v any) error {
-	if r.bodyBytes == nil {
+	if r == nil || len(r.bodyBytes) == 0 {
 		return fmt.Errorf("response body is empty")
 	}
 	return json.Unmarshal(r.bodyBytes, v)
 }
 
-// Success 判断响应是否成功（2xx状态码）
+// Success reports whether the status code is in the 2xx range.
 func (r *Response) Success() bool {
-	return r.StatusCode >= 200 && r.StatusCode < 300
+	return r != nil && r.StatusCode >= http.StatusOK && r.StatusCode < http.StatusMultipleChoices
 }
 
-// Error 返回响应错误
-func (r *Response) Error() error {
+// Error returns an HTTPError for non-2xx responses.
+func (r *Response) Error() *HTTPError {
+	if r == nil {
+		return &HTTPError{Message: "response is nil"}
+	}
 	if r.Success() {
 		return nil
 	}
@@ -99,7 +100,15 @@ func (r *Response) Error() error {
 	}
 }
 
-// HTTPError HTTP错误
+// ReadTime returns how long it took to read the response body.
+func (r *Response) ReadTime() time.Duration {
+	if r == nil {
+		return 0
+	}
+	return r.readTime
+}
+
+// HTTPError describes a non-2xx HTTP response.
 type HTTPError struct {
 	StatusCode int
 	Message    string
@@ -107,39 +116,43 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Message == "" {
+		return fmt.Sprintf("HTTP error: status=%d", e.StatusCode)
+	}
 	return fmt.Sprintf("HTTP error: status=%d, message=%s", e.StatusCode, e.Message)
 }
 
-// IsNotFound 判断是否为404错误
+// IsNotFound reports whether the response status is 404.
 func (e *HTTPError) IsNotFound() bool {
 	return e.StatusCode == http.StatusNotFound
 }
 
-// IsTimeout 判断是否为超时错误
+// IsTimeout reports whether the response status is 408 or 504.
 func (e *HTTPError) IsTimeout() bool {
 	return e.StatusCode == http.StatusRequestTimeout ||
 		e.StatusCode == http.StatusGatewayTimeout
 }
 
-// IsClientError 判断是否为客户端错误（4xx）
+// IsClientError reports whether the response status is in the 4xx range.
 func (e *HTTPError) IsClientError() bool {
-	return e.StatusCode >= 400 && e.StatusCode < 500
+	return e.StatusCode >= http.StatusBadRequest && e.StatusCode < http.StatusInternalServerError
 }
 
-// IsServerError 判断是否为服务器错误（5xx）
+// IsServerError reports whether the response status is in the 5xx range.
 func (e *HTTPError) IsServerError() bool {
-	return e.StatusCode >= 500 && e.StatusCode < 600
+	return e.StatusCode >= http.StatusInternalServerError && e.StatusCode < 600
 }
 
-// ========== 中间件系统 ==========
-
-// Middleware 中间件类型
+// Middleware wraps a request handler.
 type Middleware func(next Handler) Handler
 
-// Handler 处理器类型
+// Handler sends or handles a request.
 type Handler func(ctx *Context) error
 
-// Context 中间件上下文
+// Context is passed through middleware for a single request attempt.
 type Context struct {
 	Request   *http.Request
 	Response  *http.Response
@@ -148,7 +161,7 @@ type Context struct {
 	StartTime time.Time
 }
 
-// NewContext 创建新的中间件上下文
+// NewContext creates middleware context for req.
 func NewContext(req *http.Request) *Context {
 	return &Context{
 		Request:   req,
@@ -157,14 +170,12 @@ func NewContext(req *http.Request) *Context {
 	}
 }
 
-// ========== 重试策略 ==========
-
-// BackoffStrategy 退避策略接口
+// BackoffStrategy returns the delay before a retry attempt.
 type BackoffStrategy interface {
 	Next(retry int) time.Duration
 }
 
-// LinearBackoff 线性退避
+// LinearBackoff increases the delay linearly.
 type LinearBackoff struct {
 	Interval time.Duration
 }
@@ -173,7 +184,7 @@ func (lb *LinearBackoff) Next(retry int) time.Duration {
 	return time.Duration(retry+1) * lb.Interval
 }
 
-// ExponentialBackoff 指数退避
+// ExponentialBackoff increases the delay exponentially up to Max.
 type ExponentialBackoff struct {
 	Initial time.Duration
 	Max     time.Duration
@@ -187,7 +198,7 @@ func (eb *ExponentialBackoff) Next(retry int) time.Duration {
 	return duration
 }
 
-// ConstantBackoff 常数退避
+// ConstantBackoff returns the same delay for every retry.
 type ConstantBackoff struct {
 	Interval time.Duration
 }
@@ -196,22 +207,22 @@ func (cb *ConstantBackoff) Next(retry int) time.Duration {
 	return cb.Interval
 }
 
-// NewLinearBackoff 创建线性退避策略
+// NewLinearBackoff creates a linear backoff strategy.
 func NewLinearBackoff(interval time.Duration) BackoffStrategy {
 	return &LinearBackoff{Interval: interval}
 }
 
-// NewExponentialBackoff 创建指数退避策略
+// NewExponentialBackoff creates an exponential backoff strategy.
 func NewExponentialBackoff(initial, max time.Duration) BackoffStrategy {
 	return &ExponentialBackoff{Initial: initial, Max: max}
 }
 
-// NewConstantBackoff 创建常数退避策略
+// NewConstantBackoff creates a constant backoff strategy.
 func NewConstantBackoff(interval time.Duration) BackoffStrategy {
 	return &ConstantBackoff{Interval: interval}
 }
 
-// ReadResponse 读取响应体并返回包装后的响应
+// ReadResponse reads and closes resp.Body, then returns a Response wrapper.
 func ReadResponse(resp *http.Response) (*Response, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("response is nil")
@@ -224,6 +235,7 @@ func ReadResponse(resp *http.Response) (*Response, error) {
 	if resp.Body != nil {
 		bodyBytes, err = io.ReadAll(resp.Body)
 		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	return &Response{

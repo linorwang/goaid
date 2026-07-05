@@ -64,3 +64,56 @@ func DefaultConfig() *Config {
 		ConcurrentLimit:     10,
 	}
 }
+
+func normalizeConfig(config *Config) *Config {
+	if config == nil {
+		return DefaultConfig()
+	}
+
+	defaults := DefaultConfig()
+	if config.CacheConfig == nil {
+		config.CacheConfig = defaults.CacheConfig
+	} else {
+		if config.CacheConfig.Prefix == "" {
+			config.CacheConfig.Prefix = defaults.CacheConfig.Prefix
+		}
+		if config.CacheConfig.ExpireTime == 0 {
+			config.CacheConfig.ExpireTime = defaults.CacheConfig.ExpireTime
+		}
+		if config.CacheConfig.VerificationExp == 0 {
+			config.CacheConfig.VerificationExp = defaults.CacheConfig.VerificationExp
+		}
+		if config.CacheConfig.LimitCount == 0 {
+			config.CacheConfig.LimitCount = defaults.CacheConfig.LimitCount
+		}
+		if config.CacheConfig.LimitWindow == 0 {
+			config.CacheConfig.LimitWindow = defaults.CacheConfig.LimitWindow
+		}
+	}
+	if config.RetryDelay == 0 {
+		config.RetryDelay = defaults.RetryDelay
+	}
+	if config.MaxRetryDelay == 0 {
+		config.MaxRetryDelay = defaults.MaxRetryDelay
+	}
+	if config.RetryMultiplier == 0 {
+		config.RetryMultiplier = defaults.RetryMultiplier
+	}
+	if config.FailoverCooldown == 0 {
+		config.FailoverCooldown = defaults.FailoverCooldown
+	}
+	if config.HealthCheckInterval == 0 {
+		config.HealthCheckInterval = defaults.HealthCheckInterval
+	}
+	if config.Timeout == 0 {
+		config.Timeout = defaults.Timeout
+	}
+	if config.BatchSize == 0 {
+		config.BatchSize = defaults.BatchSize
+	}
+	if config.ConcurrentLimit == 0 {
+		config.ConcurrentLimit = defaults.ConcurrentLimit
+	}
+
+	return config
+}

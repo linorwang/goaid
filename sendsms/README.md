@@ -19,6 +19,43 @@
 go get github.com/linorwang/goaid/sendsms
 ```
 
+## Recommended usage
+
+Use `sendsms.New` for new code. Redis is optional for plain SMS sending, and
+only needed when you want Redis-backed rate limiting or verification-code
+storage.
+
+```go
+provider := sendsms.NewMockProvider("mock", 0, 0)
+
+client, err := sendsms.New(
+    sendsms.WithProvider("mock", provider),
+    sendsms.WithFailover(false),
+    sendsms.WithDefaultTemplate("SMS_123456"),
+    sendsms.WithDefaultSign("MySign"),
+)
+if err != nil {
+    panic(err)
+}
+
+resp, err := client.Send(context.Background(), &sendsms.SMSRequest{
+    Phone:  "13800138000",
+    Params: []string{"123456"},
+})
+```
+
+For multi-provider failover:
+
+```go
+client, err := sendsms.New(
+    sendsms.WithProvider("aliyun", aliyunProvider),
+    sendsms.WithProvider("tencent", tencentProvider),
+    sendsms.WithPrimary("aliyun"),
+    sendsms.WithBackups("tencent"),
+    sendsms.WithRedis(redisClient),
+)
+```
+
 ## 快速开始
 
 ### 基本使用

@@ -99,9 +99,84 @@ func (f *FailoverManagerImpl) GetHealthStatus() []*ProviderHealth {
 
 	status := make([]*ProviderHealth, 0, len(f.healthStatus))
 	for _, health := range f.healthStatus {
-		status = append(status, health)
+		copied := *health
+		status = append(status, &copied)
 	}
 	return status
+}
+
+// GetProviderCandidates returns providers in the order they should be tried.
+func (f *FailoverManagerImpl) GetProviderCandidates() []SMSProvider {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	names := f.providerNamesLocked()
+	providers := make([]SMSProvider, 0, len(names))
+	for _, name := range names {
+		if p, ok := f.providers[name]; ok {
+			providers = append(providers, p)
+		}
+	}
+	return providers
+}
+
+func (f *FailoverManagerImpl) providerNamesLocked() []string {
+	switch f.strategy {
+	case FailoverRandom:
+		return f.randomProviderNamesLocked()
+	case FailoverRoundRobin:
+		return f.roundRobinProviderNamesLocked()
+	default:
+		return f.sequentialProviderNamesLocked()
+	}
+}
+
+func (f *FailoverManagerImpl) sequentialProviderNamesLocked() []string {
+	allProviders := make([]string, 0, 1+len(f.backups))
+	allProviders = append(allProviders, f.primary)
+	allProviders = append(allProviders, f.backups...)
+	return f.preferAvailableLocked(allProviders)
+}
+
+func (f *FailoverManagerImpl) randomProviderNamesLocked() []string {
+	allProviders := f.sequentialProviderNamesLocked()
+	rand.Shuffle(len(allProviders), func(i, j int) {
+		allProviders[i], allProviders[j] = allProviders[j], allProviders[i]
+	})
+	return allProviders
+}
+
+func (f *FailoverManagerImpl) roundRobinProviderNamesLocked() []string {
+	allProviders := make([]string, 0, 1+len(f.backups))
+	allProviders = append(allProviders, f.primary)
+	allProviders = append(allProviders, f.backups...)
+	if len(allProviders) == 0 {
+		return allProviders
+	}
+
+	rotated := make([]string, 0, len(allProviders))
+	for i := 0; i < len(allProviders); i++ {
+		idx := (f.currentIndex + i) % len(allProviders)
+		rotated = append(rotated, allProviders[idx])
+	}
+	f.currentIndex = (f.currentIndex + 1) % len(allProviders)
+	return f.preferAvailableLocked(rotated)
+}
+
+func (f *FailoverManagerImpl) preferAvailableLocked(names []string) []string {
+	result := make([]string, 0, len(names))
+	cooldown := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := f.providers[name]; !ok {
+			continue
+		}
+		if f.isInCooldown(name) {
+			cooldown = append(cooldown, name)
+			continue
+		}
+		result = append(result, name)
+	}
+	return append(result, cooldown...)
 }
 
 // isInCooldown 判断是否在冷却期

@@ -7,19 +7,19 @@ import (
 	"time"
 )
 
-// LoggerMiddleware 日志中间件
+// LoggerMiddleware logs request lifecycle events.
 type LoggerMiddleware struct {
 	logger Logger
 }
 
-// Logger 日志接口
+// Logger is the minimal logging interface used by LoggerMiddleware.
 type Logger interface {
 	Debugf(format string, args ...any)
 	Infof(format string, args ...any)
 	Errorf(format string, args ...any)
 }
 
-// DefaultLogger 默认日志实现
+// DefaultLogger logs through the standard library log package.
 type DefaultLogger struct{}
 
 func (l *DefaultLogger) Debugf(format string, args ...any) {
@@ -34,11 +34,9 @@ func (l *DefaultLogger) Errorf(format string, args ...any) {
 	log.Printf("[ERROR] "+format, args...)
 }
 
-// NewLoggerMiddleware 创建日志中间件
+// NewLoggerMiddleware creates logging middleware.
 func NewLoggerMiddleware(logger Logger) Middleware {
-	lm := &LoggerMiddleware{
-		logger: logger,
-	}
+	lm := &LoggerMiddleware{logger: logger}
 	if logger == nil {
 		lm.logger = &DefaultLogger{}
 	}
@@ -46,11 +44,9 @@ func NewLoggerMiddleware(logger Logger) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx *Context) error {
 			start := time.Now()
-
 			lm.logger.Debugf("Request: %s %s", ctx.Request.Method, ctx.Request.URL.String())
 
 			err := next(ctx)
-
 			duration := time.Since(start)
 			if err != nil {
 				lm.logger.Errorf("Request failed: %s %s - Error: %v - Duration: %v",
@@ -59,24 +55,23 @@ func NewLoggerMiddleware(logger Logger) Middleware {
 				lm.logger.Infof("Request: %s %s - Status: %d - Duration: %v",
 					ctx.Request.Method, ctx.Request.URL.String(), ctx.Response.StatusCode, duration)
 			}
-
 			return err
 		}
 	}
 }
 
-// AuthMiddleware 认证中间件
+// AuthMiddleware adds an Authorization header.
 type AuthMiddleware struct {
 	token     string
 	tokenType string
 }
 
-// NewAuthMiddleware 创建认证中间件
+// NewAuthMiddleware creates Bearer token middleware.
 func NewAuthMiddleware(token string) Middleware {
 	return NewAuthMiddlewareWithType("Bearer", token)
 }
 
-// NewAuthMiddlewareWithType 创建带类型的认证中间件
+// NewAuthMiddlewareWithType creates token middleware with a custom token type.
 func NewAuthMiddlewareWithType(tokenType, token string) Middleware {
 	am := &AuthMiddleware{
 		token:     token,
@@ -93,13 +88,13 @@ func NewAuthMiddlewareWithType(tokenType, token string) Middleware {
 	}
 }
 
-// BasicAuthMiddleware Basic认证中间件
+// BasicAuthMiddleware adds HTTP Basic Auth.
 type BasicAuthMiddleware struct {
 	username string
 	password string
 }
 
-// NewBasicAuthMiddleware 创建Basic认证中间件
+// NewBasicAuthMiddleware creates Basic Auth middleware.
 func NewBasicAuthMiddleware(username, password string) Middleware {
 	bam := &BasicAuthMiddleware{
 		username: username,
@@ -116,13 +111,13 @@ func NewBasicAuthMiddleware(username, password string) Middleware {
 	}
 }
 
-// RetryMiddleware 重试中间件
+// RetryMiddleware retries failed requests inside the middleware chain.
 type RetryMiddleware struct {
 	maxRetries int
 	backoff    BackoffStrategy
 }
 
-// NewRetryMiddleware 创建重试中间件
+// NewRetryMiddleware creates retry middleware.
 func NewRetryMiddleware(maxRetries int, backoff BackoffStrategy) Middleware {
 	rm := &RetryMiddleware{
 		maxRetries: maxRetries,
@@ -134,44 +129,47 @@ func NewRetryMiddleware(maxRetries int, backoff BackoffStrategy) Middleware {
 
 	return func(next Handler) Handler {
 		return func(ctx *Context) error {
-			var lastErr error
+			if rm.maxRetries < 0 {
+				return next(ctx)
+			}
 
-			for retry := 0; retry <= rm.maxRetries; retry++ {
-				if retry > 0 {
-					// 执行退避
-					backoffDuration := rm.backoff.Next(retry - 1)
-					time.Sleep(backoffDuration)
+			var lastErr error
+			for attempt := 0; attempt <= rm.maxRetries; attempt++ {
+				if attempt > 0 {
+					if err := sleepWithContext(ctx.Request.Context(), rm.backoff.Next(attempt-1)); err != nil {
+						return err
+					}
+					if err := resetBodyForRetry(ctx.Request); err != nil {
+						return err
+					}
+					ctx.Response = nil
+					ctx.Error = nil
 				}
 
 				err := next(ctx)
 				if err == nil {
-					// 成功
-					if ctx.Response != nil && ctx.Response.StatusCode >= 500 && retry < rm.maxRetries {
-						// 服务器错误，继续重试
+					if shouldRetryResponse(ctx.Response, attempt, rm.maxRetries) {
 						lastErr = fmt.Errorf("server error: %d", ctx.Response.StatusCode)
+						drainAndClose(ctx.Response.Body)
 						continue
 					}
 					return nil
 				}
-
 				lastErr = err
 			}
-
 			return lastErr
 		}
 	}
 }
 
-// TimeoutMiddleware 超时中间件
+// TimeoutMiddleware adds a per-request timeout.
 type TimeoutMiddleware struct {
 	timeout time.Duration
 }
 
-// NewTimeoutMiddleware 创建超时中间件
+// NewTimeoutMiddleware creates timeout middleware.
 func NewTimeoutMiddleware(timeout time.Duration) Middleware {
-	tm := &TimeoutMiddleware{
-		timeout: timeout,
-	}
+	tm := &TimeoutMiddleware{timeout: timeout}
 
 	return func(next Handler) Handler {
 		return func(ctx *Context) error {
@@ -186,16 +184,14 @@ func NewTimeoutMiddleware(timeout time.Duration) Middleware {
 	}
 }
 
-// HeaderMiddleware 请求头中间件
+// HeaderMiddleware adds static request headers.
 type HeaderMiddleware struct {
 	headers map[string]string
 }
 
-// NewHeaderMiddleware 创建请求头中间件
+// NewHeaderMiddleware creates static header middleware.
 func NewHeaderMiddleware(headers map[string]string) Middleware {
-	hm := &HeaderMiddleware{
-		headers: headers,
-	}
+	hm := &HeaderMiddleware{headers: headers}
 
 	return func(next Handler) Handler {
 		return func(ctx *Context) error {
@@ -207,16 +203,14 @@ func NewHeaderMiddleware(headers map[string]string) Middleware {
 	}
 }
 
-// UserAgentMiddleware User-Agent中间件
+// UserAgentMiddleware adds a User-Agent header.
 type UserAgentMiddleware struct {
 	userAgent string
 }
 
-// NewUserAgentMiddleware 创建User-Agent中间件
+// NewUserAgentMiddleware creates User-Agent middleware.
 func NewUserAgentMiddleware(userAgent string) Middleware {
-	um := &UserAgentMiddleware{
-		userAgent: userAgent,
-	}
+	um := &UserAgentMiddleware{userAgent: userAgent}
 
 	return func(next Handler) Handler {
 		return func(ctx *Context) error {
@@ -228,16 +222,14 @@ func NewUserAgentMiddleware(userAgent string) Middleware {
 	}
 }
 
-// RequestIDMiddleware 请求ID中间件
+// RequestIDMiddleware adds an X-Request-ID header.
 type RequestIDMiddleware struct {
 	generator func() string
 }
 
-// NewRequestIDMiddleware 创建请求ID中间件
+// NewRequestIDMiddleware creates request ID middleware.
 func NewRequestIDMiddleware(generator func() string) Middleware {
-	rm := &RequestIDMiddleware{
-		generator: generator,
-	}
+	rm := &RequestIDMiddleware{generator: generator}
 
 	return func(next Handler) Handler {
 		return func(ctx *Context) error {
@@ -250,20 +242,19 @@ func NewRequestIDMiddleware(generator func() string) Middleware {
 
 			ctx.Request.Header.Set("X-Request-ID", requestID)
 			ctx.Metadata["request_id"] = requestID
-
 			return next(ctx)
 		}
 	}
 }
 
-// MetricsMiddleware 指标收集中间件
+// MetricsMiddleware emits request metrics through callbacks.
 type MetricsMiddleware struct {
 	onRequest  func(method, url string)
 	onResponse func(method, url string, statusCode int, duration time.Duration)
 	onError    func(method, url string, err error)
 }
 
-// NewMetricsMiddleware 创建指标收集中间件
+// NewMetricsMiddleware creates metrics middleware.
 func NewMetricsMiddleware(
 	onRequest func(method, url string),
 	onResponse func(method, url string, statusCode int, duration time.Duration),
@@ -278,14 +269,12 @@ func NewMetricsMiddleware(
 	return func(next Handler) Handler {
 		return func(ctx *Context) error {
 			start := time.Now()
-
 			if mm.onRequest != nil {
 				mm.onRequest(ctx.Request.Method, ctx.Request.URL.String())
 			}
 
 			err := next(ctx)
 			duration := time.Since(start)
-
 			if err != nil {
 				if mm.onError != nil {
 					mm.onError(ctx.Request.Method, ctx.Request.URL.String(), err)
@@ -293,7 +282,6 @@ func NewMetricsMiddleware(
 			} else if mm.onResponse != nil && ctx.Response != nil {
 				mm.onResponse(ctx.Request.Method, ctx.Request.URL.String(), ctx.Response.StatusCode, duration)
 			}
-
 			return err
 		}
 	}

@@ -23,44 +23,78 @@ type Client struct {
 	uploader *manager.Uploader
 }
 
-// NewClient creates a new S3与其他 with the given configuration
+// NewClient creates a new S3 client with the given configuration
 func NewClient(cfg *Config) (*Client, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
-	if cfg.Bucket == "" {
+	clientConfig := *cfg
+	clientConfig.Endpoint = strings.TrimSpace(clientConfig.Endpoint)
+	clientConfig.PublicEndpoint = strings.TrimSpace(clientConfig.PublicEndpoint)
+	clientConfig.Bucket = strings.TrimSpace(clientConfig.Bucket)
+
+	if clientConfig.Bucket == "" {
 		return nil, fmt.Errorf("bucket name is required")
 	}
 
-	if cfg.Endpoint == "" {
+	if clientConfig.Endpoint == "" {
 		return nil, fmt.Errorf("endpoint is required")
 	}
 
-	if cfg.AccessKeyID == "" {
+	if clientConfig.AccessKeyID == "" {
 		return nil, fmt.Errorf("access key ID is required")
 	}
 
-	if cfg.SecretAccessKey == "" {
+	if clientConfig.SecretAccessKey == "" {
 		return nil, fmt.Errorf("secret access key is required")
 	}
 
-	if cfg.Region == "" {
-		cfg.Region = "us-east-1" // default region
+	if clientConfig.Region == "" {
+		clientConfig.Region = "us-east-1" // default region
 	}
 
-	// Validate endpoint format
-	if _, err := url.Parse(cfg.Endpoint); err != nil {
+	if clientConfig.AddressingStyle == "" {
+		clientConfig.AddressingStyle = AddressingStylePath
+	}
+	if !clientConfig.AddressingStyle.isValid() {
+		return nil, fmt.Errorf("invalid addressing style: %s", clientConfig.AddressingStyle)
+	}
+
+	if clientConfig.ObjectURLStyle == "" {
+		if clientConfig.PublicEndpoint != "" {
+			clientConfig.ObjectURLStyle = ObjectURLStylePublicEndpoint
+		} else if clientConfig.AddressingStyle == AddressingStyleVirtualHost {
+			clientConfig.ObjectURLStyle = ObjectURLStyleVirtualHost
+		} else {
+			clientConfig.ObjectURLStyle = ObjectURLStylePath
+		}
+	}
+	if !clientConfig.ObjectURLStyle.isValid() {
+		return nil, fmt.Errorf("invalid object URL style: %s", clientConfig.ObjectURLStyle)
+	}
+
+	endpoint, err := normalizeEndpoint(clientConfig.Endpoint, clientConfig.UseSSL)
+	if err != nil {
 		return nil, fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	clientConfig.Endpoint = endpoint
+
+	if clientConfig.PublicEndpoint != "" {
+		publicEndpoint, err := normalizeEndpoint(clientConfig.PublicEndpoint, clientConfig.UseSSL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid public endpoint URL: %w", err)
+		}
+		clientConfig.PublicEndpoint = publicEndpoint
 	}
 
 	// Create AWS configuration
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(cfg.Region),
+		config.WithRegion(clientConfig.Region),
 		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
-				AccessKeyID:     cfg.AccessKeyID,
-				SecretAccessKey: cfg.SecretAccessKey,
+				AccessKeyID:     clientConfig.AccessKeyID,
+				SecretAccessKey: clientConfig.SecretAccessKey,
 			}, nil
 		})),
 	)
@@ -70,12 +104,12 @@ func NewClient(cfg *Config) (*Client, error) {
 
 	// Create S3 client with custom endpoint
 	s3Client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(cfg.Endpoint)
-		o.UsePathStyle = true // Use path-style for S3-compatible services
+		o.BaseEndpoint = aws.String(clientConfig.Endpoint)
+		o.UsePathStyle = clientConfig.AddressingStyle != AddressingStyleVirtualHost
 	})
 
 	client := &Client{
-		config:   cfg,
+		config:   &clientConfig,
 		s3Client: s3Client,
 		uploader: manager.NewUploader(s3Client),
 	}
@@ -443,10 +477,22 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 // buildObjectURL builds the full URL for an object
 func (c *Client) buildObjectURL(key string) string {
 	endpoint := c.config.Endpoint
-	if !strings.HasSuffix(endpoint, "/") {
-		endpoint += "/"
+	if c.config.PublicEndpoint != "" {
+		endpoint = c.config.PublicEndpoint
 	}
-	return fmt.Sprintf("%s%s/%s", endpoint, c.config.Bucket, key)
+
+	switch c.config.ObjectURLStyle {
+	case ObjectURLStylePublicEndpoint:
+		return joinURL(endpoint, key)
+	case ObjectURLStyleVirtualHost:
+		virtualHostEndpoint, err := bucketVirtualHostEndpoint(endpoint, c.config.Bucket)
+		if err != nil {
+			return joinURL(endpoint, c.config.Bucket, key)
+		}
+		return joinURL(virtualHostEndpoint, key)
+	default:
+		return joinURL(endpoint, c.config.Bucket, key)
+	}
 }
 
 // formatTime formats a time.Time to a string
@@ -460,4 +506,64 @@ func formatTime(t time.Time) string {
 // GetConfig returns the client configuration
 func (c *Client) GetConfig() *Config {
 	return c.config
+}
+
+func (s AddressingStyle) isValid() bool {
+	return s == AddressingStylePath || s == AddressingStyleVirtualHost
+}
+
+func (s ObjectURLStyle) isValid() bool {
+	return s == ObjectURLStylePath || s == ObjectURLStyleVirtualHost || s == ObjectURLStylePublicEndpoint
+}
+
+func normalizeEndpoint(endpoint string, useSSL bool) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", fmt.Errorf("endpoint is required")
+	}
+
+	if !strings.Contains(endpoint, "://") {
+		scheme := "https"
+		if !useSSL {
+			scheme = "http"
+		}
+		endpoint = scheme + "://" + endpoint
+	}
+
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("host is required")
+	}
+
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func bucketVirtualHostEndpoint(endpoint, bucket string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("host is required")
+	}
+
+	parsed.Host = bucket + "." + parsed.Host
+	return parsed.String(), nil
+}
+
+func joinURL(base string, parts ...string) string {
+	joined, err := url.JoinPath(base, parts...)
+	if err != nil {
+		return strings.TrimRight(base, "/") + "/" + strings.Join(parts, "/")
+	}
+	return joined
 }

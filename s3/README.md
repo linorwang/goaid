@@ -4,9 +4,9 @@
 
 ## 特性
 
-- **S3 协议兼容**: 支持 AWS S3 以及任何 S3 兼容服务（MinIO、Ceph、Wasabi 等）
+- **S3 协议兼容**: 支持 AWS S3 以及任何 S3 兼容服务（MinIO、RustFS、Ceph、Wasabi 等）
 - **完整的 CRUD 操作**: 支持上传、下载、删除和列出对象
-- **URL 拼接**: 自动生成并返回对象 URL，便于存储到数据库
+- **URL 拼接**: 支持 path-style、virtual-host-style、公开域名/CDN URL，便于存储到数据库
 - **元数据支持**: 可以为对象附加自定义元数据
 - **批量操作**: 单次请求删除多个对象
 - **Context 支持**: 所有操作都支持 Go 的 context，支持取消和超时
@@ -42,7 +42,6 @@ func main() {
         SecretAccessKey: "your-secret-access-key",
         Region:          "us-east-1",
         Bucket:          "your-bucket-name",
-        UseSSL:          true,
     }
     
     // 创建 S3 客户端
@@ -80,7 +79,54 @@ func main() {
 | SecretAccessKey | string | 是 | 访问密钥 |
 | Region | string | 否 | AWS 区域（默认: "us-east-1"） |
 | Bucket | string | 是 | 存储桶名称 |
-| UseSSL | bool | 否 | 是否使用 SSL（默认: true） |
+| PublicEndpoint | string | 否 | 返回对象 URL 时使用的公开访问域名，如 CDN 或绑定到 bucket 的域名 |
+| AddressingStyle | AddressingStyle | 否 | 请求寻址方式，默认 `AddressingStylePath`，可选 `AddressingStyleVirtualHost` |
+| ObjectURLStyle | ObjectURLStyle | 否 | 对象 URL 生成方式，支持 `ObjectURLStylePath`、`ObjectURLStyleVirtualHost`、`ObjectURLStylePublicEndpoint` |
+| UseSSL | bool | 否 | 兼容旧配置：仅当 Endpoint/PublicEndpoint 不带 `http://` 或 `https://` 时用于补全协议 |
+
+### 通用 S3 兼容配置建议
+
+自建 S3 服务（如 MinIO、RustFS）通常使用 path-style 请求，即 `endpoint/bucket/key`：
+
+```go
+cfg := &s3.Config{
+    Endpoint:        "http://localhost:9000",
+    AccessKeyID:     "access-key",
+    SecretAccessKey: "secret-key",
+    Region:          "us-east-1",
+    Bucket:          "my-bucket",
+    AddressingStyle: s3.AddressingStylePath,
+}
+```
+
+如果对象对外通过 CDN 或自定义公开域名访问，可以单独配置 `PublicEndpoint`：
+
+```go
+cfg := &s3.Config{
+    Endpoint:        "http://localhost:9000",
+    PublicEndpoint:  "https://files.example.com",
+    AccessKeyID:     "access-key",
+    SecretAccessKey: "secret-key",
+    Region:          "us-east-1",
+    Bucket:          "my-bucket",
+    AddressingStyle: s3.AddressingStylePath,
+    ObjectURLStyle:  s3.ObjectURLStylePublicEndpoint,
+}
+```
+
+云厂商或 AWS S3 需要 virtual-host-style 时可以显式切换：
+
+```go
+cfg := &s3.Config{
+    Endpoint:        "https://s3.amazonaws.com",
+    AccessKeyID:     "your-access-key",
+    SecretAccessKey: "your-secret-key",
+    Region:          "us-east-1",
+    Bucket:          "your-bucket",
+    AddressingStyle: s3.AddressingStyleVirtualHost,
+    ObjectURLStyle:  s3.ObjectURLStyleVirtualHost,
+}
+```
 
 ## API 参考
 
@@ -324,7 +370,21 @@ cfg := &s3.Config{
     SecretAccessKey: "minioadmin",
     Region:          "us-east-1",
     Bucket:          "my-bucket",
-    UseSSL:          false,
+    AddressingStyle: s3.AddressingStylePath,
+}
+```
+
+### RustFS
+```go
+cfg := &s3.Config{
+    Endpoint:        "http://localhost:9000",
+    PublicEndpoint:  "https://files.example.com",
+    AccessKeyID:     "your-access-key",
+    SecretAccessKey: "your-secret-key",
+    Region:          "us-east-1",
+    Bucket:          "my-bucket",
+    AddressingStyle: s3.AddressingStylePath,
+    ObjectURLStyle:  s3.ObjectURLStylePublicEndpoint,
 }
 ```
 
@@ -336,6 +396,8 @@ cfg := &s3.Config{
     SecretAccessKey: "your-secret-key",
     Region:          "us-east-1",
     Bucket:          "my-space",
+    AddressingStyle: s3.AddressingStyleVirtualHost,
+    ObjectURLStyle:  s3.ObjectURLStyleVirtualHost,
 }
 ```
 
@@ -347,6 +409,8 @@ cfg := &s3.Config{
     SecretAccessKey: "your-secret-key",
     Region:          "us-east-1",
     Bucket:          "my-bucket",
+    AddressingStyle: s3.AddressingStyleVirtualHost,
+    ObjectURLStyle:  s3.ObjectURLStyleVirtualHost,
 }
 ```
 
@@ -416,7 +480,7 @@ if err != nil {
 - 元数据处理
 - 批量操作
 - 用于数据库存储的 URL 生成
-- MinIO 集成
+- MinIO/RustFS 集成
 
 ## 许可证
 

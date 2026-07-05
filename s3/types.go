@@ -1,13 +1,38 @@
 package s3
 
+// AddressingStyle controls how requests address buckets.
+type AddressingStyle string
+
+const (
+	// AddressingStylePath sends requests as endpoint/bucket/key.
+	AddressingStylePath AddressingStyle = "path"
+	// AddressingStyleVirtualHost sends requests as bucket.endpoint/key.
+	AddressingStyleVirtualHost AddressingStyle = "virtual-host"
+)
+
+// ObjectURLStyle controls how object URLs are generated for returned results.
+type ObjectURLStyle string
+
+const (
+	// ObjectURLStylePath builds URLs as endpoint/bucket/key.
+	ObjectURLStylePath ObjectURLStyle = "path"
+	// ObjectURLStyleVirtualHost builds URLs as bucket.endpoint/key.
+	ObjectURLStyleVirtualHost ObjectURLStyle = "virtual-host"
+	// ObjectURLStylePublicEndpoint builds URLs as public-endpoint/key.
+	ObjectURLStylePublicEndpoint ObjectURLStyle = "public-endpoint"
+)
+
 // Config holds the S3 client configuration
 type Config struct {
-	Endpoint        string // S3 endpoint URL (e.g., "https://s3.amazonaws.com")
+	Endpoint        string // S3 endpoint URL (e.g., "https://s3.amazonaws.com" or "localhost:9000")
+	PublicEndpoint  string // Optional public base URL for returned object URLs (e.g., CDN or bucket domain)
 	AccessKeyID     string // Access key ID
 	SecretAccessKey string // Secret access key
 	Region          string // AWS region (e.g., "us-east-1")
 	Bucket          string // Bucket name
-	UseSSL          bool   // Whether to use SSL (default: true)
+	AddressingStyle AddressingStyle
+	ObjectURLStyle  ObjectURLStyle
+	UseSSL          bool // Deprecated: only used when Endpoint/PublicEndpoint does not include a URL scheme
 }
 
 // UploadResult contains the result of an upload operation
