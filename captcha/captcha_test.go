@@ -2,138 +2,129 @@ package captcha
 
 import (
 	"context"
-	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
 
-// MockCaptchaStore 模拟验证码存储用于测试
-type MockCaptchaStore struct {
-	data map[string]string
-	ttl  map[string]time.Time
-}
-
-func NewMockCaptchaStore() *MockCaptchaStore {
-	return &MockCaptchaStore{
-		data: make(map[string]string),
-		ttl:  make(map[string]time.Time),
-	}
-}
-
-func (m *MockCaptchaStore) Set(ctx context.Context, id string, value string, expire time.Duration) error {
-	m.data[id] = value
-	m.ttl[id] = time.Now().Add(expire)
-	return nil
-}
-
-func (m *MockCaptchaStore) Get(ctx context.Context, id string) (string, error) {
-	if expiry, exists := m.ttl[id]; exists && time.Now().After(expiry) {
-		delete(m.data, id)
-		delete(m.ttl, id)
-		return "", fmt.Errorf("captcha not found")
-	}
-	
-	if value, exists := m.data[id]; exists {
-		return value, nil
-	}
-	return "", fmt.Errorf("captcha not found")
-}
-
-func (m *MockCaptchaStore) Delete(ctx context.Context, id string) error {
-	delete(m.data, id)
-	delete(m.ttl, id)
-	return nil
-}
-
-func TestImageCaptchaService(t *testing.T) {
-	store := NewMockCaptchaStore()
-	
-	opts := CaptchaOption{
-		ExpireTime: 5 * time.Minute,
-		Length:     4,
-		Width:      120,
-		Height:     40,
-	}
-	
-	service := NewDefaultImageCaptchaService(store, opts)
-	
-	// 测试生成验证码
+func TestImageCaptchaServiceSimpleAPI(t *testing.T) {
 	ctx := context.Background()
-	resp, err := service.GenerateImageCaptcha(ctx, 120, 40)
+	service := New(nil, CaptchaOption{
+		IncludeValue: true,
+	})
+
+	resp, err := service.Generate(ctx)
 	if err != nil {
-		t.Fatalf("GenerateImageCaptcha failed: %v", err)
+		t.Fatalf("Generate failed: %v", err)
 	}
-	
 	if resp.ID == "" {
-		t.Fatal("Expected captcha ID, got empty")
+		t.Fatal("expected captcha ID")
 	}
-	
 	if resp.Value == "" {
-		t.Fatal("Expected captcha value, got empty")
+		t.Fatal("expected captcha value when IncludeValue is enabled")
 	}
-		
-	if resp.ImageBase64 == "" {
-		t.Fatal("Expected captcha image base64, got empty")
+	if !strings.HasPrefix(resp.ImageBase64, "data:image/png;base64,") {
+		t.Fatalf("expected png data URI, got %q", resp.ImageBase64[:min(24, len(resp.ImageBase64))])
 	}
-		
-	// 测试验证验证码
-	isValid, err := service.VerifyCaptcha(ctx, resp.ID, resp.Value)
+
+	valid, err := service.Verify(ctx, resp.ID, resp.Value)
 	if err != nil {
-		t.Fatalf("VerifyCaptcha failed: %v", err)
+		t.Fatalf("Verify failed: %v", err)
 	}
-	
-	if !isValid {
-		t.Error("Expected captcha to be valid")
+	if !valid {
+		t.Fatal("expected captcha to be valid")
 	}
-	
-	// 由于验证码已验证成功并被删除，现在应该找不到该验证码
-	isValid, err = service.VerifyCaptcha(ctx, resp.ID, resp.Value)
-	if err == nil {
-		t.Error("Expected error when verifying same captcha again")
-	}
-	
-	// 生成另一个验证码用于测试错误答案
-	resp2, err := service.GenerateImageCaptcha(ctx, 120, 40)
+
+	valid, err = service.Verify(ctx, resp.ID, resp.Value)
 	if err != nil {
-		t.Fatalf("GenerateImageCaptcha failed: %v", err)
+		t.Fatalf("Verify repeated captcha returned unexpected error: %v", err)
 	}
-	
-	// 测试错误的验证码
-	isValid, err = service.VerifyCaptcha(ctx, resp2.ID, "wrong")
+	if valid {
+		t.Fatal("expected captcha to be consumed after successful verification")
+	}
+}
+
+func TestGenerateDoesNotExposeValueByDefault(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryCaptchaStore()
+	service := New(store)
+
+	resp, err := service.Generate(ctx)
 	if err != nil {
-		t.Errorf("VerifyCaptcha failed with wrong answer: %v", err)
+		t.Fatalf("Generate failed: %v", err)
 	}
-	
-	if isValid {
-		t.Error("Expected captcha to be invalid with wrong answer")
+	if resp.Value != "" {
+		t.Fatal("captcha value must not be exposed by default")
+	}
+
+	answer, err := store.Get(ctx, resp.ID)
+	if err != nil {
+		t.Fatalf("Get stored answer failed: %v", err)
+	}
+
+	valid, err := service.Verify(ctx, resp.ID, answer)
+	if err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+	if !valid {
+		t.Fatal("expected stored answer to verify")
+	}
+}
+
+func TestVerifyWrongAnswer(t *testing.T) {
+	ctx := context.Background()
+	service := New(nil, CaptchaOption{
+		IncludeValue: true,
+	})
+
+	resp, err := service.Generate(ctx)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	valid, err := service.Verify(ctx, resp.ID, "wrong")
+	if err != nil {
+		t.Fatalf("Verify returned unexpected error: %v", err)
+	}
+	if valid {
+		t.Fatal("expected wrong answer to be invalid")
 	}
 }
 
 func TestCaptchaExpiration(t *testing.T) {
-	store := NewMockCaptchaStore()
-	
-	opts := CaptchaOption{
-		ExpireTime: 100 * time.Millisecond, // 短暂过期时间用于测试
-		Length:     4,
-		Width:      120,
-		Height:     40,
-	}
-	
-	service := NewDefaultImageCaptchaService(store, opts)
-	
 	ctx := context.Background()
-	resp, err := service.GenerateImageCaptcha(ctx, 120, 40)
+	service := New(nil, CaptchaOption{
+		ExpireTime:   100 * time.Millisecond,
+		IncludeValue: true,
+	})
+
+	resp, err := service.Generate(ctx)
 	if err != nil {
-		t.Errorf("GenerateImageCaptcha failed: %v", err)
+		t.Fatalf("Generate failed: %v", err)
 	}
-	
-	// 等待过期
+
 	time.Sleep(200 * time.Millisecond)
-	
-	// 验证过期的验证码应该失败
-	_, err = service.VerifyCaptcha(ctx, resp.ID, resp.Value)
-	if err == nil {
-		t.Error("Expected error when verifying expired captcha")
+
+	valid, err := service.Verify(ctx, resp.ID, resp.Value)
+	if err != nil {
+		t.Fatalf("Verify expired captcha returned unexpected error: %v", err)
+	}
+	if valid {
+		t.Fatal("expected expired captcha to be invalid")
 	}
 }
 
+func TestGenerateImageCaptchaWithCustomSize(t *testing.T) {
+	ctx := context.Background()
+	service := New(nil)
+
+	resp, err := service.GenerateImageCaptcha(ctx, 200, 60)
+	if err != nil {
+		t.Fatalf("GenerateImageCaptcha failed: %v", err)
+	}
+
+	bounds := resp.Image.Bounds()
+	if bounds.Dx() != 200 || bounds.Dy() != 60 {
+		t.Fatalf("expected 200x60 image, got %dx%d", bounds.Dx(), bounds.Dy())
+	}
+}

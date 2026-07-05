@@ -2,28 +2,22 @@ package captcha
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisCaptchaStore 基于Redis的验证码存储
+// RedisCaptchaStore stores captcha answers in Redis.
 type RedisCaptchaStore struct {
-	client redis.Cmdable // 使用 redis.Cmdable 接口，支持单机、集群、哨兵等模式
-	prefix string        // 键前缀
+	client redis.Cmdable
+	prefix string
 }
 
-// NewRedisCaptchaStore 创建Redis验证码存储
-// 参数:
-//   - client: Redis 客户端实例，支持 redis.Cmdable 接口的任何实现
-//   - prefix: Redis 键前缀（可选，默认为 "captcha:"）
+// NewRedisCaptchaStore creates a Redis-backed captcha store.
 //
-// 支持的 Redis 客户端类型:
-//   - *redis.Client (单机模式)
-//   - *redis.ClusterClient (集群模式)
-//   - *redis.Ring (哨兵模式)
-//   - 任何实现了 redis.Cmdable 接口的自定义客户端
+// The client can be *redis.Client, *redis.ClusterClient, *redis.Ring, or any
+// custom implementation of redis.Cmdable.
 func NewRedisCaptchaStore(client redis.Cmdable, prefix string) *RedisCaptchaStore {
 	if prefix == "" {
 		prefix = "captcha:"
@@ -34,27 +28,33 @@ func NewRedisCaptchaStore(client redis.Cmdable, prefix string) *RedisCaptchaStor
 	}
 }
 
-// Set 存储验证码
-func (r *RedisCaptchaStore) Set(ctx context.Context, id string, value string, expire time.Duration) error {
-	key := r.prefix + id
-	return r.client.Set(ctx, key, value, expire).Err()
+// NewRedisService creates an image captcha service backed by Redis.
+func NewRedisService(client redis.Cmdable, prefix string, options ...CaptchaOption) *DefaultImageCaptchaService {
+	return New(NewRedisCaptchaStore(client, prefix), options...)
 }
 
-// Get 获取验证码
+// Set stores a captcha answer.
+func (r *RedisCaptchaStore) Set(ctx context.Context, id string, value string, expire time.Duration) error {
+	return r.client.Set(ctx, r.key(id), value, expire).Err()
+}
+
+// Get returns a captcha answer.
 func (r *RedisCaptchaStore) Get(ctx context.Context, id string) (string, error) {
-	key := r.prefix + id
-	value, err := r.client.Get(ctx, key).Result()
+	value, err := r.client.Get(ctx, r.key(id)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrCaptchaNotFound
+	}
 	if err != nil {
-		if err == redis.Nil {
-			return "", fmt.Errorf("captcha not found")
-		}
 		return "", err
 	}
 	return value, nil
 }
 
-// Delete 删除验证码
+// Delete removes a captcha answer.
 func (r *RedisCaptchaStore) Delete(ctx context.Context, id string) error {
-	key := r.prefix + id
-	return r.client.Del(ctx, key).Err()
+	return r.client.Del(ctx, r.key(id)).Err()
+}
+
+func (r *RedisCaptchaStore) key(id string) string {
+	return r.prefix + id
 }

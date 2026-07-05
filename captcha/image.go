@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"image/png"
 	"strings"
 	"time"
@@ -11,124 +12,161 @@ import (
 	"github.com/mojocn/base64Captcha"
 )
 
-// DefaultImageCaptchaService 默认图片验证码服务
+const (
+	defaultExpireTime = 5 * time.Minute
+	defaultLength     = 4
+	defaultWidth      = 120
+	defaultHeight     = 40
+	defaultComplexity = 80
+)
+
+// DefaultImageCaptchaService is the default image captcha implementation.
 type DefaultImageCaptchaService struct {
 	store   CaptchaStore
 	options CaptchaOption
 }
 
-// NewDefaultImageCaptchaService 创建默认图片验证码服务
+// New creates an image captcha service with defaults.
+//
+// Passing nil as store creates an in-memory store, which is convenient for
+// tests and single-process demos. Use RedisCaptchaStore for production.
+func New(store CaptchaStore, options ...CaptchaOption) *DefaultImageCaptchaService {
+	option := CaptchaOption{}
+	if len(options) > 0 {
+		option = options[0]
+	}
+	return NewDefaultImageCaptchaService(store, option)
+}
+
+// NewDefaultImageCaptchaService creates the default image captcha service.
 func NewDefaultImageCaptchaService(store CaptchaStore, options CaptchaOption) *DefaultImageCaptchaService {
-	if options.ExpireTime == 0 {
-		options.ExpireTime = 5 * time.Minute // 默认5分钟过期
-	}
-	if options.Length == 0 {
-		options.Length = 4 // 默认4位验证码
-	}
-	if options.Width == 0 {
-		options.Width = 120 // 默认宽度
-	}
-	if options.Height == 0 {
-		options.Height = 40 // 默认高度
+	if store == nil {
+		store = NewMemoryCaptchaStore()
 	}
 
 	return &DefaultImageCaptchaService{
 		store:   store,
-		options: options,
+		options: withDefaults(options),
 	}
 }
 
-// GenerateImageCaptcha 生成图片验证码
+func withDefaults(options CaptchaOption) CaptchaOption {
+	if options.ExpireTime <= 0 {
+		options.ExpireTime = defaultExpireTime
+	}
+	if options.Length <= 0 {
+		options.Length = defaultLength
+	}
+	if options.Width <= 0 {
+		options.Width = defaultWidth
+	}
+	if options.Height <= 0 {
+		options.Height = defaultHeight
+	}
+	if options.Complexity <= 0 {
+		options.Complexity = defaultComplexity
+	}
+	return options
+}
+
+// Generate creates a captcha with the configured default size.
+func (s *DefaultImageCaptchaService) Generate(ctx context.Context) (*CaptchaResponse, error) {
+	return s.GenerateImageCaptcha(ctx, 0, 0)
+}
+
+// GenerateImageCaptcha creates an image captcha. Width and height fall back to
+// service defaults when they are less than or equal to zero.
 func (s *DefaultImageCaptchaService) GenerateImageCaptcha(ctx context.Context, width, height int) (*CaptchaResponse, error) {
-	if width == 0 {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if width <= 0 {
 		width = s.options.Width
 	}
-	if height == 0 {
+	if height <= 0 {
 		height = s.options.Height
 	}
 
-	// 创建数字验证码驱动
-	driver := base64Captcha.NewDriverDigit(height, width, s.options.Length, 0.7, 80)
-
-	// 创建验证码
+	driver := base64Captcha.NewDriverDigit(height, width, s.options.Length, 0.7, s.options.Complexity)
 	captcha := base64Captcha.NewCaptcha(driver, nil)
 
-	// 生成验证码
-	idKey, content, _ := captcha.Driver.GenerateIdQuestionAnswer()
-	item, err := captcha.Driver.DrawCaptcha(content)
+	id, answer, _ := captcha.Driver.GenerateIdQuestionAnswer()
+	item, err := captcha.Driver.DrawCaptcha(answer)
 	if err != nil {
 		return nil, err
 	}
 
-	// 将图片转换为base64字符串
-	b64s := item.EncodeB64string()
-		
-	// 解码base64为图片字节
-	// 移除base64字符串中的前缀部分，如 "data:image/png;base64," 
-	if idx := strings.Index(b64s, ","); idx != -1 {
-		b64s = b64s[idx+1:]
+	imageBase64 := item.EncodeB64string()
+	imageData := imageBase64
+	if idx := strings.Index(imageData, ","); idx != -1 {
+		imageData = imageData[idx+1:]
 	}
-		
-	imgData, err := base64.StdEncoding.DecodeString(b64s)
-	if err != nil {
-		return nil, err
-	}
-		
-	// 创建图片
-	img, err := png.Decode(bytes.NewReader(imgData))
+
+	imgBytes, err := base64.StdEncoding.DecodeString(imageData)
 	if err != nil {
 		return nil, err
 	}
 
-	// 存储验证码到存储器
-	err = s.store.Set(ctx, idKey, content, s.options.ExpireTime)
+	img, err := png.Decode(bytes.NewReader(imgBytes))
 	if err != nil {
 		return nil, err
 	}
 
-	// 将图片转换为base64字符串
-	var buf bytes.Buffer
-	err = png.Encode(&buf, img)
-	if err != nil {
+	if err := s.store.Set(ctx, id, answer, s.options.ExpireTime); err != nil {
 		return nil, err
 	}
-	imgBytes := buf.Bytes()
-	base64Str := base64.StdEncoding.EncodeToString(imgBytes)
-
-	expireAt := time.Now().Add(s.options.ExpireTime)
 
 	response := &CaptchaResponse{
-		ID:        idKey,
-		Image:     img,
-		ImageBase64: "data:image/png;base64," + base64Str,
-		ExpireAt:  expireAt,
-		// 注意：在生产环境中，不应返回Value字段，这里仅用于演示
-		Value:     content,
+		ID:          id,
+		Image:       img,
+		ImageBase64: imageBase64,
+		ExpireAt:    time.Now().Add(s.options.ExpireTime),
+	}
+	if s.options.IncludeValue {
+		response.Value = answer
 	}
 
 	return response, nil
 }
 
-// VerifyCaptcha 验证验证码
+// Verify verifies a captcha with the configured store.
+func (s *DefaultImageCaptchaService) Verify(ctx context.Context, id, answer string) (bool, error) {
+	return s.VerifyCaptcha(ctx, id, answer)
+}
+
+// VerifyCaptcha verifies a captcha. Missing, expired, or empty values return
+// false with nil error so HTTP handlers can use the boolean directly.
 func (s *DefaultImageCaptchaService) VerifyCaptcha(ctx context.Context, id, answer string) (bool, error) {
-	// 获取存储的验证码
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	id = strings.TrimSpace(id)
+	answer = strings.TrimSpace(answer)
+	if id == "" || answer == "" {
+		return false, nil
+	}
+
 	storedAnswer, err := s.store.Get(ctx, id)
+	if errors.Is(err, ErrCaptchaNotFound) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
 
-	// 验证答案是否正确
-	isValid := strings.ToLower(storedAnswer) == strings.ToLower(answer)
-
+	isValid := strings.EqualFold(strings.TrimSpace(storedAnswer), answer)
 	if isValid {
-		// 验证成功后删除验证码（防止重复使用）
-		s.store.Delete(ctx, id)
+		if err := s.store.Delete(ctx, id); err != nil {
+			return false, err
+		}
 	}
 
 	return isValid, nil
 }
 
-// DeleteCaptcha 删除验证码
+// DeleteCaptcha deletes a captcha from the store.
 func (s *DefaultImageCaptchaService) DeleteCaptcha(ctx context.Context, id string) error {
 	return s.store.Delete(ctx, id)
 }
