@@ -317,6 +317,9 @@ captcha.NewDefaultImageCaptchaService(存储实例, 配置选项)
 | Length     | 验证码长度        | 4       |
 | Width      | 图片宽度（像素）   | 120     |
 | Height     | 图片高度（像素）   | 40      |
+| Type       | 验证码类型：`CaptchaTypeDigit` 或 `CaptchaTypeString` | `CaptchaTypeDigit` |
+| CharacterSource | 字符串验证码的字符集；不为空时会自动使用字符串验证码 | 空 |
+| Complexity | 字符串验证码噪声数量 | 0 |
 
 **示例：**
 ```go
@@ -325,6 +328,22 @@ service := captcha.NewDefaultImageCaptchaService(captchaStore, captcha.CaptchaOp
     Length:     4,
     Width:      120,
     Height:     40,
+})
+```
+
+**数字字母混合验证码：**
+```go
+service := captcha.NewDefaultImageCaptchaService(captchaStore, captcha.CaptchaOption{
+    Type:   captcha.CaptchaTypeString,
+    Length: 6,
+})
+```
+
+**纯英文字母验证码：**
+```go
+service := captcha.NewDefaultImageCaptchaService(captchaStore, captcha.CaptchaOption{
+    Length:          6,
+    CharacterSource: captcha.CaptchaSourceLetters,
 })
 ```
 

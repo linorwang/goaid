@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"image/png"
 	"strings"
 	"time"
@@ -47,8 +48,11 @@ func (s *DefaultImageCaptchaService) GenerateImageCaptcha(ctx context.Context, w
 		height = s.options.Height
 	}
 
-	// 创建数字验证码驱动
-	driver := base64Captcha.NewDriverDigit(height, width, s.options.Length, 0.7, 80)
+	// 创建验证码驱动
+	driver, err := s.createDriver(height, width)
+	if err != nil {
+		return nil, err
+	}
 
 	// 创建验证码
 	captcha := base64Captcha.NewCaptcha(driver, nil)
@@ -62,18 +66,18 @@ func (s *DefaultImageCaptchaService) GenerateImageCaptcha(ctx context.Context, w
 
 	// 将图片转换为base64字符串
 	b64s := item.EncodeB64string()
-		
+
 	// 解码base64为图片字节
-	// 移除base64字符串中的前缀部分，如 "data:image/png;base64," 
+	// 移除base64字符串中的前缀部分，如 "data:image/png;base64,"
 	if idx := strings.Index(b64s, ","); idx != -1 {
 		b64s = b64s[idx+1:]
 	}
-		
+
 	imgData, err := base64.StdEncoding.DecodeString(b64s)
 	if err != nil {
 		return nil, err
 	}
-		
+
 	// 创建图片
 	img, err := png.Decode(bytes.NewReader(imgData))
 	if err != nil {
@@ -98,15 +102,41 @@ func (s *DefaultImageCaptchaService) GenerateImageCaptcha(ctx context.Context, w
 	expireAt := time.Now().Add(s.options.ExpireTime)
 
 	response := &CaptchaResponse{
-		ID:        idKey,
-		Image:     img,
+		ID:          idKey,
+		Image:       img,
 		ImageBase64: "data:image/png;base64," + base64Str,
-		ExpireAt:  expireAt,
+		ExpireAt:    expireAt,
 		// 注意：在生产环境中，不应返回Value字段，这里仅用于演示
-		Value:     content,
+		Value: content,
 	}
 
 	return response, nil
+}
+
+func (s *DefaultImageCaptchaService) createDriver(height, width int) (base64Captcha.Driver, error) {
+	options := s.options
+
+	if options.CharacterSource != "" && options.Type == "" {
+		options.Type = CaptchaTypeString
+	}
+
+	switch options.Type {
+	case "", CaptchaTypeDigit:
+		return base64Captcha.NewDriverDigit(height, width, options.Length, 0.7, 80), nil
+	case CaptchaTypeString:
+		source := options.CharacterSource
+		if source == "" {
+			source = CaptchaSourceAlphaNumeric
+		}
+		noiseCount := options.Complexity
+		if noiseCount < 0 {
+			noiseCount = 0
+		}
+		showLineOptions := base64Captcha.OptionShowHollowLine | base64Captcha.OptionShowSineLine
+		return base64Captcha.NewDriverString(height, width, noiseCount, showLineOptions, options.Length, source, nil, nil, nil), nil
+	default:
+		return nil, fmt.Errorf("unsupported captcha type: %s", options.Type)
+	}
 }
 
 // VerifyCaptcha 验证验证码

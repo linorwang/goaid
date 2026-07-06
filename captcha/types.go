@@ -6,35 +6,56 @@ import (
 	"time"
 )
 
-// CaptchaStore 验证码存储接口
+// CaptchaType defines the image captcha generator type.
+type CaptchaType string
+
+const (
+	// CaptchaTypeDigit generates numeric captcha codes. This is the default.
+	CaptchaTypeDigit CaptchaType = "digit"
+	// CaptchaTypeString generates captcha codes from CharacterSource.
+	CaptchaTypeString CaptchaType = "string"
+)
+
+const (
+	// CaptchaSourceDigits contains numeric characters for string captchas.
+	CaptchaSourceDigits = "0123456789"
+	// CaptchaSourceLetters contains upper and lower case English letters.
+	CaptchaSourceLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	// CaptchaSourceAlphaNumeric contains digits and English letters.
+	CaptchaSourceAlphaNumeric = CaptchaSourceDigits + CaptchaSourceLetters
+)
+
+// CaptchaStore stores captcha values.
 type CaptchaStore interface {
 	Set(ctx context.Context, id string, value string, expire time.Duration) error
 	Get(ctx context.Context, id string) (string, error)
 	Delete(ctx context.Context, id string) error
 }
 
-// ImageCaptchaService 图片验证码服务接口
+// ImageCaptchaService generates and verifies image captchas.
 type ImageCaptchaService interface {
 	GenerateImageCaptcha(ctx context.Context, width, height int) (*CaptchaResponse, error)
 	VerifyCaptcha(ctx context.Context, id, answer string) (bool, error)
 	DeleteCaptcha(ctx context.Context, id string) error
 }
 
-// CaptchaOption 验证码配置选项
+// CaptchaOption configures image captcha generation.
 type CaptchaOption struct {
-	ExpireTime time.Duration // 过期时间
-	Length     int          // 验证码长度
-	Width      int          // 图片宽度
-	Height     int          // 图片高度
-	Complexity int          // 复杂度级别
+	ExpireTime      time.Duration // expiration duration
+	Length          int           // captcha code length
+	Width           int           // image width in pixels
+	Height          int           // image height in pixels
+	Complexity      int           // noise count for string captchas
+	Type            CaptchaType   // captcha type, default CaptchaTypeDigit
+	CharacterSource string        // character source for string captchas
 }
 
-// CaptchaResponse 验证码响应结构
+// CaptchaResponse is the generated captcha payload.
 type CaptchaResponse struct {
-	ID       string      `json:"id"`
-	Image    image.Image `json:"-"`      // 图片数据
-	ImageURL string      `json:"image_url,omitempty"` // 图片URL（可选）
-	ImageBase64 string   `json:"image_base64"`        // base64格式的图片数据
-	Value    string      `json:"value,omitempty"`     // 验证码值（仅用于测试，生产环境不应返回）
-	ExpireAt time.Time   `json:"expire_at"`
+	ID          string      `json:"id"`
+	Image       image.Image `json:"-"`
+	ImageURL    string      `json:"image_url,omitempty"`
+	ImageBase64 string      `json:"image_base64"`
+	Value       string      `json:"value,omitempty"` // for tests only; do not return to clients in production
+	ExpireAt    time.Time   `json:"expire_at"`
 }
