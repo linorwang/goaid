@@ -370,6 +370,47 @@ func TestConcurrentSubmitAndShutdown(t *testing.T) {
 	}
 }
 
+func TestSubmitBlockedByFullQueueRejectsOnClose(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{})
+	p := MustNew(Options{Workers: 1, QueueSize: 1})
+
+	if err := p.Submit(context.Background(), func(context.Context) error {
+		close(started)
+		<-block
+		return nil
+	}); err != nil {
+		t.Fatalf("submit running task: %v", err)
+	}
+	<-started
+
+	if err := p.Submit(context.Background(), func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("submit queued task: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- p.Submit(context.Background(), func(context.Context) error { return nil })
+	}()
+
+	time.Sleep(time.Millisecond)
+	p.Close()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("blocked submit error = %v, want %v", err, ErrClosed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked submit did not return after close")
+	}
+
+	close(block)
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown failed: %v", err)
+	}
+}
+
 func TestDynamicScalingGrowAndShrink(t *testing.T) {
 	block := make(chan struct{})
 	p := MustNew(Options{
@@ -401,6 +442,45 @@ func TestDynamicScalingGrowAndShrink(t *testing.T) {
 
 	waitUntil(t, time.Second, func() bool {
 		return p.Stats().Workers == 1
+	})
+}
+
+func TestDynamicScalingGrowsWhenWorkersAreBusy(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 3)
+	p := MustNew(Options{
+		MinWorkers:  3,
+		MaxWorkers:  4,
+		QueueSize:   8,
+		IdleTimeout: time.Second,
+	})
+	defer func() {
+		close(block)
+		_ = p.Shutdown(context.Background())
+	}()
+
+	for i := 0; i < 3; i++ {
+		if err := p.Submit(context.Background(), func(context.Context) error {
+			started <- struct{}{}
+			<-block
+			return nil
+		}); err != nil {
+			t.Fatalf("submit running task: %v", err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		<-started
+	}
+
+	if err := p.Submit(context.Background(), func(context.Context) error {
+		<-block
+		return nil
+	}); err != nil {
+		t.Fatalf("submit queued task: %v", err)
+	}
+
+	waitUntil(t, time.Second, func() bool {
+		return p.Stats().Workers == 4
 	})
 }
 

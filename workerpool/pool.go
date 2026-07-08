@@ -23,6 +23,9 @@ type Pool struct {
 	closeOnce sync.Once
 	closed    atomic.Bool
 
+	submitMu   sync.Mutex
+	queueSlots chan struct{}
+
 	workerMu   sync.Mutex
 	workerCond *sync.Cond
 	workers    int
@@ -57,8 +60,12 @@ func New(opts Options) (*Pool, error) {
 		opts:       normalized,
 		tasks:      make(chan job, normalized.QueueSize),
 		done:       make(chan struct{}),
+		queueSlots: make(chan struct{}, normalized.QueueSize),
 		stopCtx:    stopCtx,
 		stopCancel: stopCancel,
+	}
+	for i := 0; i < normalized.QueueSize; i++ {
+		p.queueSlots <- struct{}{}
 	}
 	p.taskCond = sync.NewCond(&p.taskMu)
 	p.workerCond = sync.NewCond(&p.workerMu)
@@ -129,10 +136,10 @@ func (p *Pool) WaitContext(ctx context.Context) error {
 
 func (p *Pool) Close() {
 	p.closeOnce.Do(func() {
-		p.workerMu.Lock()
+		p.submitMu.Lock()
 		p.closed.Store(true)
-		p.workerMu.Unlock()
 		close(p.done)
+		p.submitMu.Unlock()
 	})
 }
 
@@ -196,9 +203,13 @@ func (p *Pool) submit(ctx context.Context, task Task, timeout time.Duration, rej
 	var err error
 	if rejectWhenFull {
 		select {
-		case p.tasks <- j:
-			p.maybeGrow()
-			return nil
+		case <-p.queueSlots:
+			if p.enqueueReserved(j) {
+				p.maybeGrow()
+				return nil
+			}
+			p.releaseQueueSlot()
+			err = ErrClosed
 		case <-ctx.Done():
 			err = ctx.Err()
 		case <-p.done:
@@ -218,9 +229,13 @@ func (p *Pool) submit(ctx context.Context, task Task, timeout time.Duration, rej
 	}
 
 	select {
-	case p.tasks <- j:
-		p.maybeGrow()
-		return nil
+	case <-p.queueSlots:
+		if p.enqueueReserved(j) {
+			p.maybeGrow()
+			return nil
+		}
+		p.releaseQueueSlot()
+		err = ErrClosed
 	case <-ctx.Done():
 		err = ctx.Err()
 	case <-p.done:
@@ -243,6 +258,21 @@ func (p *Pool) reject(err error) error {
 	return err
 }
 
+func (p *Pool) enqueueReserved(j job) bool {
+	p.submitMu.Lock()
+	defer p.submitMu.Unlock()
+
+	if p.closed.Load() {
+		return false
+	}
+	p.tasks <- j
+	return true
+}
+
+func (p *Pool) releaseQueueSlot() {
+	p.queueSlots <- struct{}{}
+}
+
 func (p *Pool) worker() {
 	counted := true
 	defer func() {
@@ -262,6 +292,7 @@ func (p *Pool) worker() {
 		idleTimer := p.idleTimer()
 		select {
 		case j := <-p.tasks:
+			p.releaseQueueSlot()
 			stopTimer(idleTimer)
 			p.run(j)
 		case <-p.done:
@@ -269,6 +300,7 @@ func (p *Pool) worker() {
 			for {
 				select {
 				case j := <-p.tasks:
+					p.releaseQueueSlot()
 					p.run(j)
 				default:
 					return
@@ -459,7 +491,7 @@ func (p *Pool) maybeGrow() {
 	p.workerMu.Lock()
 	defer p.workerMu.Unlock()
 
-	for !p.closed.Load() && len(p.tasks) > p.workers && p.workers < p.opts.MaxWorkers {
+	for !p.closed.Load() && len(p.tasks) > 0 && p.workers < p.opts.MaxWorkers {
 		p.workers++
 		go p.worker()
 	}
@@ -473,10 +505,6 @@ func (p *Pool) tryRetireWorker() bool {
 		return false
 	}
 	p.workers--
-	if len(p.tasks) > 0 {
-		p.workers++
-		return false
-	}
 	if p.workers == 0 {
 		p.workerCond.Broadcast()
 	}
