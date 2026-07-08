@@ -3,7 +3,6 @@ module github.com/linorwang/goaid
 go 1.25.3
 
 require (
-	github.com/aliyun/alibaba-cloud-sdk-go v1.61.1606
 	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.21.1
@@ -11,8 +10,6 @@ require (
 	github.com/mojocn/base64Captcha v1.3.8
 	github.com/redis/go-redis/v9 v9.17.1
 	github.com/smartwalle/alipay/v3 v3.2.30
-	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.0.506
-	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sms v1.0.506
 	github.com/wechatpay-apiv3/wechatpay-go v0.2.21
 	go.uber.org/zap v1.27.1
 	software.sslmate.com/src/go-pkcs12 v0.7.3
