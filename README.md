@@ -103,6 +103,11 @@ S3 协议兼容对象存储客户端
 
 ### 辅助工具
 
+#### [qrcode](qrcode/README.md) - Enterprise QR Code toolkit
+PNG/SVG, logo embedding, Base64/Data URI, atomic file output, and structured payloads.
+
+---
+
 #### [randx](randx/README.md) - 随机字符串生成
 随机字符串生成工具
 
@@ -153,6 +158,7 @@ goaid/
 ├── s3/               # S3 对象存储模块
 ├── slice/            # 切片工具模块
 ├── stringx/          # 字符串工具模块
+|-- qrcode/           # Enterprise QR Code toolkit
 ├── randx/            # 随机字符串生成模块
 ├── tuple/            # 元组模块
 │   └── pair/

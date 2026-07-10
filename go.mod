@@ -7,11 +7,14 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.21.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
+	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/mojocn/base64Captcha v1.3.8
 	github.com/redis/go-redis/v9 v9.17.1
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/smartwalle/alipay/v3 v3.2.30
 	github.com/wechatpay-apiv3/wechatpay-go v0.2.21
 	go.uber.org/zap v1.27.1
+	golang.org/x/image v0.23.0
 	software.sslmate.com/src/go-pkcs12 v0.7.3
 )
 
@@ -40,5 +43,6 @@ require (
 	github.com/smartwalle/nsign v1.0.9 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/crypto v0.23.0 // indirect
-	golang.org/x/image v0.23.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 )
